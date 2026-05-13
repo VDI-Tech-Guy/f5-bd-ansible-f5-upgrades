@@ -1,0 +1,36 @@
+## Last Updated: 2026-05-12
+namespace: f5networks
+name: f5_upgrades
+version: 1.0.0
+readme: README.md
+authors:
+  - f5networks
+description: >
+  Automated upgrade orchestration for F5OS (rSeries/Velos) and BIG-IP devices
+  (standalone and HA), with pre/post snapshot collection and JSON diff reporting.
+license_file: LICENSE
+tags:
+  - f5
+  - bigip
+  - f5os
+  - upgrades
+  - networking
+dependencies:
+  f5networks.f5_modules: '*'
+  f5networks.f5_bigip: '*'
+  f5networks.f5os: '*'
+  ansible.utils: '*'
+  ansible.posix: '*'
+  ansible.netcommon: '*'
+  community.general: '*'
+repository: https://github.com/f5devcentral/f5-bd-ansible-f5-upgrades
+documentation: https://github.com/f5devcentral/f5-bd-ansible-f5-upgrades
+homepage: https://github.com/f5devcentral/f5-bd-ansible-f5-upgrades
+issues: https://github.com/f5devcentral/f5-bd-ansible-f5-upgrades/issues
+build_ignore:
+  - ".venv"
+  - "venv"
+  - "snapshots"
+  - ".git"
+  - ".gitignore"
+  - "*.retry"

@@ -1,0 +1,43 @@
+---
+# =============================================================================
+# F5OS rSeries Upgrade Playbook
+# =============================================================================
+# Usage:
+#   ansible-playbook playbooks/F5OS/Upgrades/rSeries/upgrade.yaml \
+#     -i inventory/hosts.ini \
+#     -e "f5os_image_filename=F5OS-A-1.8.0-13798.R4R5.iso" \
+#     --limit rseries-r2600-01
+# =============================================================================
+
+- name: "F5OS rSeries Upgrade - Pre-Snapshot"
+  hosts: "{{ target_hosts | default('f5os_rseries') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    snapshot_phase: pre
+    snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+  roles:
+    - role: snapshot_pre
+  tags: [snapshot, pre_snapshot]
+
+- name: "F5OS rSeries Upgrade - Software Install"
+  hosts: "{{ target_hosts | default('f5os_rseries') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  roles:
+    - role: f5os_upgrade/rseries
+  tags: [upgrade]
+
+- name: "F5OS rSeries Upgrade - Post-Snapshot & Diff"
+  hosts: "{{ target_hosts | default('f5os_rseries') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    snapshot_phase: post
+  roles:
+    - role: snapshot_post
+    - role: snapshot_report
+  tags: [snapshot, post_snapshot, report]

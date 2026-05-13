@@ -1,0 +1,6 @@
+---
+snapshot_output_dir: "{{ playbook_dir }}/../../../snapshots"
+# Fail the play if post-snapshot detects regressions
+snapshot_fail_on_regression: true
+# Percentage of pool members allowed to be down post-upgrade before failing
+snapshot_pool_member_down_threshold_pct: 0

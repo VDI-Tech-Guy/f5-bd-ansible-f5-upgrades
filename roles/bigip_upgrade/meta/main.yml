@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  role_name: bigip_upgrade
+  author: f5networks
+  description: >
+    Handles BIG-IP software image upload, boot volume install,
+    and reboot orchestration. Compatible with BIG-IP 13.1+.
+  min_ansible_version: "2.9"
+collections:
+  - f5networks.f5_bigip
+  - f5networks.f5_modules
+  - ansible.builtin
+dependencies:
+  - bigip_wait

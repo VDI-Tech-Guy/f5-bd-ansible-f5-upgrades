@@ -1,0 +1,130 @@
+---
+# =============================================================================
+# BIG-IP HA Pair Upgrade Playbook
+# =============================================================================
+# Upgrade order:
+#   1. Pre-snapshot both units
+#   2. Upgrade standby unit → wait → verify
+#   3. Force failover (standby becomes active)
+#   4. Upgrade old-active (now standby) → wait → verify
+#   5. Optional: fail back to original active
+#   6. Post-snapshot both units → diff report
+#
+# Usage:
+#   ansible-playbook playbooks/BIG-IP/Upgrades/ha/upgrade.yaml \
+#     -i inventory/hosts.ini \
+#     -e "bigip_target_version=17.1.1 bigip_image_filename=BIGIP-17.1.1-0.0.4.iso" \
+#     --limit bigip_ha_pair01
+#
+# Inventory requirement:
+#   Each device in the HA pair must have ha_role=active or ha_role=standby set.
+#
+# Extra vars:
+#   bigip_target_version    - Version string to verify post-upgrade
+#   bigip_image_filename    - ISO filename in bigip_image_local_path
+#   bigip_failback          - Set 'true' to fail back after upgrade (default: false)
+#   bigip_upgrade_dry_run   - Set 'true' to skip reboots (default: false)
+# =============================================================================
+
+- name: "BIG-IP HA Upgrade - Pre-Snapshot (Both Units)"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    snapshot_phase: pre
+    snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+  roles:
+    - role: snapshot_pre
+  tags: [snapshot, pre_snapshot]
+
+- name: "BIG-IP HA Upgrade - Upgrade Standby Unit"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    # Only target the standby unit in this play
+    ansible_limit_ha_role: standby
+  pre_tasks:
+    - name: "Skip if this host is not the standby"
+      ansible.builtin.meta: end_host
+      when: ha_role != 'standby'
+  roles:
+    - role: bigip_upgrade
+    - role: bigip_wait
+  tags: [upgrade, upgrade_standby]
+
+- name: "BIG-IP HA Upgrade - Force Failover to Standby"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  pre_tasks:
+    - name: "Skip if this host is not the active unit"
+      ansible.builtin.meta: end_host
+      when: ha_role != 'active'
+  tasks:
+    - name: "Trigger failover - active unit yields to standby"
+      f5networks.f5_bigip.bigip_command:
+        commands:
+          - "run /sys failover standby"
+      when: not bigip_upgrade_dry_run | bool
+      ignore_errors: true   # Connection drops immediately on failover - expected
+
+    - name: "Pause to allow failover to complete"
+      ansible.builtin.pause:
+        seconds: 30
+      when: not bigip_upgrade_dry_run | bool
+  tags: [upgrade, failover]
+
+- name: "BIG-IP HA Upgrade - Upgrade Old-Active (Now Standby)"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  pre_tasks:
+    - name: "Skip if this host is not the original active"
+      ansible.builtin.meta: end_host
+      when: ha_role != 'active'
+  roles:
+    - role: bigip_upgrade
+    - role: bigip_wait
+  tags: [upgrade, upgrade_active]
+
+- name: "BIG-IP HA Upgrade - Optional Failback"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  pre_tasks:
+    - name: "Skip failback if not requested"
+      ansible.builtin.meta: end_host
+      when: not (bigip_failback | default(false) | bool)
+
+    - name: "Skip if this host is not the original standby (now active)"
+      ansible.builtin.meta: end_host
+      when: ha_role != 'standby'
+  tasks:
+    - name: "Fail back to original active unit"
+      f5networks.f5_bigip.bigip_command:
+        commands:
+          - "run /sys failover standby"
+      ignore_errors: true
+
+    - name: "Pause to allow failback to complete"
+      ansible.builtin.pause:
+        seconds: 30
+  tags: [upgrade, failback]
+
+- name: "BIG-IP HA Upgrade - Post-Snapshot & Diff (Both Units)"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    snapshot_phase: post
+  roles:
+    - role: snapshot_post
+    - role: snapshot_report
+  tags: [snapshot, post_snapshot, report]

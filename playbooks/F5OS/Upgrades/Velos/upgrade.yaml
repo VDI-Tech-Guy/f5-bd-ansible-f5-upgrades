@@ -1,0 +1,59 @@
+---
+# =============================================================================
+# F5OS Velos Upgrade Playbook
+# =============================================================================
+# Upgrade order:
+#   1. Pre-snapshot (controller + partitions)
+#   2. Upgrade chassis controller(s)
+#   3. Wait for controller to come back + tenant stabilization
+#   4. Upgrade partition(s)
+#   5. Post-snapshot & diff
+#
+# Usage:
+#   ansible-playbook playbooks/F5OS/Upgrades/Velos/upgrade.yaml \
+#     -i inventory/hosts.ini \
+#     -e "f5os_image_filename=F5OS-C-1.8.0-3198.CHASSIS.iso" \
+#     --limit velos-chassis-01-ctrl:velos-chassis-01-part1
+# =============================================================================
+
+- name: "F5OS Velos Upgrade - Pre-Snapshot"
+  hosts: "{{ target_hosts | default('f5os_velos') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    snapshot_phase: pre
+    snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+  roles:
+    - role: snapshot_pre
+  tags: [snapshot, pre_snapshot]
+
+- name: "F5OS Velos Upgrade - Upgrade Chassis Controller"
+  hosts: "{{ target_hosts | default('f5os_velos_controller') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  roles:
+    - role: f5os_upgrade/velos
+  tags: [upgrade, upgrade_controller]
+
+- name: "F5OS Velos Upgrade - Upgrade Partitions"
+  hosts: "{{ target_hosts | default('f5os_velos_partition') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  roles:
+    - role: f5os_upgrade/velos
+  tags: [upgrade, upgrade_partition]
+
+- name: "F5OS Velos Upgrade - Post-Snapshot & Diff"
+  hosts: "{{ target_hosts | default('f5os_velos') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    snapshot_phase: post
+  roles:
+    - role: snapshot_post
+    - role: snapshot_report
+  tags: [snapshot, post_snapshot, report]

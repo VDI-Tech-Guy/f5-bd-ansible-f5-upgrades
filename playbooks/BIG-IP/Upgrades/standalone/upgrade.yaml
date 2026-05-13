@@ -1,0 +1,49 @@
+---
+# =============================================================================
+# BIG-IP Standalone Upgrade Playbook
+# =============================================================================
+# Usage:
+#   ansible-playbook playbooks/BIG-IP/Upgrades/standalone/upgrade.yaml \
+#     -i inventory/hosts.ini \
+#     -e "bigip_target_version=17.1.1 bigip_image_filename=BIGIP-17.1.1-0.0.4.iso" \
+#     --limit bigip-standalone-01
+#
+# Extra vars:
+#   bigip_target_version   - Version string to verify post-upgrade (e.g. 17.1.1)
+#   bigip_image_filename   - ISO filename present in bigip_image_local_path
+#   bigip_upgrade_dry_run  - Set 'true' to skip reboot (default: false)
+# =============================================================================
+
+- name: "BIG-IP Standalone Upgrade - Pre-Snapshot"
+  hosts: "{{ target_hosts | default('bigip_standalone') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    snapshot_phase: pre
+    snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+  roles:
+    - role: snapshot_pre
+  tags: [snapshot, pre_snapshot]
+
+- name: "BIG-IP Standalone Upgrade - Software Install"
+  hosts: "{{ target_hosts | default('bigip_standalone') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  roles:
+    - role: bigip_upgrade
+    - role: bigip_wait
+  tags: [upgrade]
+
+- name: "BIG-IP Standalone Upgrade - Post-Snapshot & Diff"
+  hosts: "{{ target_hosts | default('bigip_standalone') }}"
+  gather_facts: false
+  vars_files:
+    - vars/upgrade_vars.yml
+  vars:
+    snapshot_phase: post
+  roles:
+    - role: snapshot_post
+    - role: snapshot_report
+  tags: [snapshot, post_snapshot, report]

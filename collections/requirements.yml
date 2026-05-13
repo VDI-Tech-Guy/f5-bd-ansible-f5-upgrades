@@ -1,0 +1,24 @@
+---
+# Collections required for f5-bd-ansible-f5-upgrades
+# Install with: ansible-galaxy collection install -r collections/requirements.yml
+#
+# Minimum version requirements:
+#   f5networks.f5_bigip  >= 1.0.0  (iControl REST modules, BIG-IP 13.1+ compatible)
+#   f5networks.f5os      >= 1.0.0  (F5OS REST modules for rSeries/Velos)
+#   f5networks.f5_modules >= 1.0.0 (legacy TMSH/SOAP modules, BIG-IP 13.x fallback)
+
+collections:
+  - name: f5networks.f5_bigip
+    source: https://galaxy.ansible.com
+  - name: f5networks.f5os
+    source: https://galaxy.ansible.com
+  - name: f5networks.f5_modules
+    source: https://galaxy.ansible.com
+  - name: ansible.utils
+    source: https://galaxy.ansible.com
+  - name: ansible.posix
+    source: https://galaxy.ansible.com
+  - name: ansible.netcommon
+    source: https://galaxy.ansible.com
+  - name: community.general
+    source: https://galaxy.ansible.com

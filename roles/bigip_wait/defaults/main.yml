@@ -1,0 +1,7 @@
+---
+bigip_reboot_initial_delay: 60
+bigip_wait_retry_delay: 20
+bigip_wait_max_retries: 30
+bigip_ssh_port: 22
+bigip_https_port: 443
+bigip_wait_host: "{{ ansible_host }}"

@@ -1,0 +1,60 @@
+---
+# group_vars/bigip.yml
+# Variables shared across all BIG-IP devices.
+# Sensitive values (passwords, tokens) should be stored in Ansible Vault.
+# Override per-device in host_vars/<hostname>.yml as needed.
+
+# -----------------------------------------------------------------------------
+# Connection
+# -----------------------------------------------------------------------------
+ansible_connection: httpapi
+ansible_network_os: f5networks.f5_bigip.bigip
+ansible_httpapi_port: 443
+ansible_httpapi_use_ssl: true
+ansible_httpapi_validate_certs: false
+
+# -----------------------------------------------------------------------------
+# Upgrade settings
+# -----------------------------------------------------------------------------
+# Path on Ansible controller where BIG-IP upgrade images are staged
+bigip_image_local_path: "/mnt/software/bigip"
+
+# Remote path on BIG-IP where image is uploaded (iControl REST uploads to /var/config/rest/downloads)
+bigip_image_remote_path: "/var/config/rest/downloads"
+
+# Boot volume to install to (HD1.1 = primary, HD1.2 = secondary)
+# Set per-host in host_vars if devices differ
+bigip_install_volume: "HD1.2"
+
+# Whether to reboot immediately after image install
+bigip_reboot_after_install: true
+
+# -----------------------------------------------------------------------------
+# Wait / reboot timing
+# -----------------------------------------------------------------------------
+# Seconds to wait after triggering reboot before starting port checks
+bigip_reboot_initial_delay: 60
+
+# Seconds between REST readiness probe retries
+bigip_wait_retry_delay: 20
+
+# Maximum number of REST readiness probe attempts (~30 * 20s = 10 min)
+bigip_wait_max_retries: 30
+
+# Port to probe for SSH liveness (used to confirm reboot started + completed)
+bigip_ssh_port: 22
+
+# Port to probe for REST API liveness
+bigip_https_port: 443
+
+# -----------------------------------------------------------------------------
+# Snapshot settings
+# -----------------------------------------------------------------------------
+# Directory on Ansible controller where snapshot JSON files are saved
+snapshot_output_dir: "{{ playbook_dir }}/../../../snapshots"
+
+# Whether to save a UCS backup as part of the pre-snapshot
+bigip_snapshot_save_ucs: true
+
+# UCS backup directory on the BIG-IP
+bigip_ucs_path: "/var/local/ucs"

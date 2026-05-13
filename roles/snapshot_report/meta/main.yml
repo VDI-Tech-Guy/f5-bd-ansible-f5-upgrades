@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: snapshot_report
+  author: f5networks
+  description: >
+    Renders the JSON diff from snapshot_post into a formatted
+    Ansible stdout summary. Called at end of upgrade playbooks.
+  min_ansible_version: "2.9"
+collections:
+  - ansible.builtin
+dependencies:
+  - snapshot_post
