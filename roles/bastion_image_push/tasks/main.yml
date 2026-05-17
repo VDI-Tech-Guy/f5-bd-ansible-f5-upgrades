@@ -1,34 +1,41 @@
 ---
 # =============================================================================
-# bastion_image_push - SCP image from bastion CIFS mount to BIG-IP
+# bastion_image_push
 # =============================================================================
-# The bastion is an AAP inventory object in [bastion] group.
-# Tasks that run on it use delegate_to: "{{ bastion_host }}" where bastion_host
-# is the inventory hostname (e.g. "bastion01") set in extra_vars.
-# AAP resolves connection details (user, password, become) from the Machine
-# Credential bound to the Job Template.
+# Network topology:
+#   bastion  <-- SSH -->  AAP EE  <-- SSH/HTTPS -->  BIG-IP
+#   bastion has NO direct path to BIG-IP.
 #
 # Flow:
 #   1. Verify image exists on bastion CIFS mount
-#   2. Check if image already on BIG-IP (idempotent - skip SCP if so)
-#   3. SCP image bastion -> BIG-IP /shared/images/ (async, up to 30 min)
-#   4. Poll BIG-IP REST until image status is 'verified'
+#   2. Check if image already registered on BIG-IP (idempotent)
+#   3. EE fetches image FROM bastion -> /runner/artifacts/images/ on EE
+#   4. EE SCPs image FROM EE -> BIG-IP /shared/images/
+#   5. Poll BIG-IP REST until image status is 'verified'
+#   6. Remove local EE copy (free up EE runner space)
 # =============================================================================
+
+# -----------------------------------------------------------------------------
+# Step 1 - Verify image exists on bastion CIFS mount
+# -----------------------------------------------------------------------------
 
 - name: "BASTION_PUSH | Verify image exists on bastion CIFS mount"
   ansible.builtin.stat:
     path: "{{ bastion_image_path }}/{{ bigip_image_filename }}"
   register: bastion_image_stat
-  delegate_to: "{{ bastion_host }}"
+  delegate_to: bastion01
   failed_when: not bastion_image_stat.stat.exists
 
 - name: "BASTION_PUSH | Image confirmed on bastion"
   ansible.builtin.debug:
     msg: >-
-      Image found on bastion ({{ bastion_host }}):
+      Image found on bastion:
       {{ bastion_image_path }}/{{ bigip_image_filename }}
       ({{ (bastion_image_stat.stat.size / 1024 / 1024) | round(1) }} MB)
-  delegate_to: "{{ bastion_host }}"
+
+# -----------------------------------------------------------------------------
+# Step 2 - Check if image already on BIG-IP (skip fetch+SCP if so)
+# -----------------------------------------------------------------------------
 
 - name: "BASTION_PUSH | Check if image already registered on BIG-IP"
   ansible.builtin.uri:
@@ -52,32 +59,72 @@
          | selectattr('name', 'equalto', bigip_image_filename)
          | list | length > 0 }}
 
-- name: "BASTION_PUSH | Image already on BIG-IP - skipping SCP"
+- name: "BASTION_PUSH | Image already on BIG-IP - skipping fetch and transfer"
   ansible.builtin.debug:
-    msg: "{{ bigip_image_filename }} already present on {{ inventory_hostname }} - skipping transfer."
+    msg: "{{ bigip_image_filename }} already registered on {{ inventory_hostname }} - skipping."
   when: bigip_image_already_present | bool
 
-- name: "BASTION_PUSH | SCP image from bastion to BIG-IP /shared/images/"
+# -----------------------------------------------------------------------------
+# Step 3 - EE fetches image FROM bastion to EE local staging dir
+# fetch module runs the transfer over the existing SSH connection to bastion01.
+# The file lands at {{ bigip_ee_staging_dir }}/{{ bigip_image_filename }} on the EE.
+# -----------------------------------------------------------------------------
+
+- name: "BASTION_PUSH | Ensure EE staging directory exists"
+  ansible.builtin.file:
+    path: "{{ bigip_ee_staging_dir }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  when: not bigip_image_already_present | bool
+
+- name: "BASTION_PUSH | Fetch image from bastion to EE staging dir"
+  ansible.builtin.fetch:
+    src: "{{ bastion_image_path }}/{{ bigip_image_filename }}"
+    dest: "{{ bigip_ee_staging_dir }}/{{ bigip_image_filename }}"
+    flat: true
+  delegate_to: bastion01
+  when: not bigip_image_already_present | bool
+  # BIG-IP ISOs are ~2GB - this will take several minutes
+  # fetch does not support async - the EE connection to bastion must stay open
+
+- name: "BASTION_PUSH | Image fetched to EE staging dir"
+  ansible.builtin.debug:
+    msg: "Image staged locally on EE at {{ bigip_ee_staging_dir }}/{{ bigip_image_filename }}"
+  when: not bigip_image_already_present | bool
+
+# -----------------------------------------------------------------------------
+# Step 4 - EE SCPs image FROM EE -> BIG-IP /shared/images/
+# SCP originates from the EE which has direct SSH access to BIG-IP mgmt.
+# -----------------------------------------------------------------------------
+
+- name: "BASTION_PUSH | SCP image from EE to BIG-IP /shared/images/"
   ansible.builtin.shell: >
-    scp -P {{ bigip_scp_port | default(22) }}
-    {{ bigip_scp_opts | default('-o StrictHostKeyChecking=no -o BatchMode=yes') }}
-    {{ bastion_image_path }}/{{ bigip_image_filename }}
-    {{ bigip_scp_user }}@{{ ansible_host }}:{{ bigip_remote_image_path }}/{{ bigip_image_filename }}
+    scp -P {{ bigip_ssh_port | default(22) }}
+    -o StrictHostKeyChecking=no
+    -o BatchMode=yes
+    {{ bigip_ee_staging_dir }}/{{ bigip_image_filename }}
+    {{ ansible_user }}@{{ ansible_host }}:/shared/images/{{ bigip_image_filename }}
   args:
     executable: /bin/bash
-  delegate_to: "{{ bastion_host }}"
+  delegate_to: localhost
   when: not bigip_image_already_present | bool
-  register: bastion_scp_result
-  # BIG-IP ISOs are ~2GB - allow up to 30 minutes
+  register: ee_scp_result
+  # Allow up to 30 minutes for the SCP transfer
   async: 1800
   poll: 30
 
 - name: "BASTION_PUSH | SCP transfer complete"
   ansible.builtin.debug:
     msg: >-
-      Transfer complete: {{ bigip_image_filename }}
-      -> {{ inventory_hostname }} ({{ ansible_host }}):{{ bigip_remote_image_path }}/
+      SCP complete: {{ bigip_image_filename }}
+      -> {{ inventory_hostname }} ({{ ansible_host }}):/shared/images/
   when: not bigip_image_already_present | bool
+
+# -----------------------------------------------------------------------------
+# Step 5 - Poll BIG-IP until image is 'verified'
+# BIG-IP scans and verifies the ISO after it appears in /shared/images/
+# -----------------------------------------------------------------------------
 
 - name: "BASTION_PUSH | Poll BIG-IP until image is verified and ready"
   ansible.builtin.uri:
@@ -102,3 +149,15 @@
 - name: "BASTION_PUSH | Image verified and ready on BIG-IP"
   ansible.builtin.debug:
     msg: "{{ bigip_image_filename }} is verified and ready on {{ inventory_hostname }} ({{ ansible_host }})."
+
+# -----------------------------------------------------------------------------
+# Step 6 - Remove local EE staging copy to free runner space
+# The EE runner has limited disk - don't leave ~2GB ISOs sitting around
+# -----------------------------------------------------------------------------
+
+- name: "BASTION_PUSH | Remove image from EE staging dir"
+  ansible.builtin.file:
+    path: "{{ bigip_ee_staging_dir }}/{{ bigip_image_filename }}"
+    state: absent
+  delegate_to: localhost
+  when: not bigip_image_already_present | bool

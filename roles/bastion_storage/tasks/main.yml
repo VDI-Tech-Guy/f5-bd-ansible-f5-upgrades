@@ -1,43 +1,40 @@
 ---
 # =============================================================================
-# bastion_storage - Push snapshot JSONs and UCS backup to bastion storage
+# bastion_storage
 # =============================================================================
-# The bastion is an AAP inventory object in [bastion] group.
-# Tasks that run on it use delegate_to: "{{ bastion_host }}".
-# AAP resolves credentials from the Machine Credential bound to the Job Template.
-#
-# Directory structure on bastion CIFS mount:
-#   {{ bastion_backup_root }}/
-#     {{ inventory_hostname }}/
-#       {{ backup_date }}/
-#         {{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
-#         {{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json
-#         {{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json
-#         {{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs
+# Network topology:
+#   bastion  <-- SSH -->  AAP EE  <-- SSH/HTTPS -->  BIG-IP
+#   bastion has NO direct path to BIG-IP.
 #
 # Flow:
 #   1. Create per-device/date directory on bastion
-#   2. Copy snapshot JSON files from EE /runner/artifacts -> bastion
-#   3. Trigger UCS save on BIG-IP
-#   4. SCP UCS directly from BIG-IP to bastion (large file never touches EE)
-#   5. Confirm all files stored
+#   2. Copy snapshot JSON files from EE /runner/artifacts/ -> bastion
+#   3. Save UCS on BIG-IP using f5networks.f5_bigip.bigip_ucs_fetch module
+#      (downloads UCS from BIG-IP to EE /runner/artifacts/)
+#   4. Copy UCS from EE -> bastion CIFS mount
+#   5. Confirm all files stored on bastion
 # =============================================================================
 
 - name: "BASTION_STORAGE | Set bastion backup path for this device"
   ansible.builtin.set_fact:
     bastion_device_backup_path: "{{ bastion_backup_root }}/{{ inventory_hostname }}/{{ backup_date }}"
 
+# -----------------------------------------------------------------------------
+# Step 1 - Create per-device/date directory on bastion
+# -----------------------------------------------------------------------------
+
 - name: "BASTION_STORAGE | Create per-device/date directory on bastion"
   ansible.builtin.file:
     path: "{{ bastion_device_backup_path }}"
     state: directory
     mode: '0755'
-  delegate_to: "{{ bastion_host }}"
+  delegate_to: bastion01
   become: true
 
 # -----------------------------------------------------------------------------
-# Push snapshot JSON files from EE runner -> bastion
-# ansible.builtin.copy reads src on the EE and writes dest to bastion over SSH
+# Step 2 - Copy snapshot JSONs from EE /runner/artifacts/ -> bastion
+# ansible.builtin.copy with delegate_to: bastion01 reads src on the EE and
+# writes dest on the bastion over the existing SSH connection
 # -----------------------------------------------------------------------------
 
 - name: "BASTION_STORAGE | Copy pre-snapshot JSON to bastion"
@@ -45,7 +42,7 @@
     src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json"
     dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json"
     mode: '0644'
-  delegate_to: "{{ bastion_host }}"
+  delegate_to: bastion01
   become: true
 
 - name: "BASTION_STORAGE | Copy post-snapshot JSON to bastion"
@@ -53,7 +50,7 @@
     src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json"
     dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json"
     mode: '0644'
-  delegate_to: "{{ bastion_host }}"
+  delegate_to: bastion01
   become: true
 
 - name: "BASTION_STORAGE | Copy diff JSON to bastion"
@@ -61,65 +58,72 @@
     src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json"
     dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json"
     mode: '0644'
-  delegate_to: "{{ bastion_host }}"
+  delegate_to: bastion01
   become: true
 
 # -----------------------------------------------------------------------------
-# UCS: trigger save on BIG-IP, SCP directly from BIG-IP to bastion
-# The bastion pulls from BIG-IP so the UCS never passes through the EE
+# Step 3 - Fetch UCS from BIG-IP to EE using the F5 module
+# bigip_ucs_fetch saves and downloads the UCS to the EE runner filesystem.
+# dest is a directory - module writes <dest>/<ucs_name>.ucs
 # -----------------------------------------------------------------------------
 
-- name: "BASTION_STORAGE | Trigger UCS save on BIG-IP"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/ucs"
-    method: POST
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    body_format: json
-    body:
-      command: save
-      name: "{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade"
-    status_code: [200, 202]
+- name: "BASTION_STORAGE | Ensure UCS staging directory exists on EE"
+  ansible.builtin.file:
+    path: "{{ snapshot_output_dir }}"
+    state: directory
+    mode: '0755'
   delegate_to: localhost
-  no_log: true
   when: bigip_snapshot_save_ucs | default(true) | bool
 
-- name: "BASTION_STORAGE | Wait for UCS save to complete on BIG-IP"
-  ansible.builtin.pause:
-    seconds: 15
+- name: "BASTION_STORAGE | Fetch UCS from BIG-IP to EE (save + download)"
+  f5networks.f5_bigip.bigip_ucs_fetch:
+    src: "{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade"
+    dest: "{{ snapshot_output_dir }}/"
+    create_on_missing: true
+    fail_on_missing: false
+  register: ucs_fetch_result
   when: bigip_snapshot_save_ucs | default(true) | bool
 
-- name: "BASTION_STORAGE | SCP UCS from BIG-IP directly to bastion"
-  ansible.builtin.shell: >
-    scp -P {{ bigip_scp_port | default(22) }}
-    {{ bigip_scp_opts | default('-o StrictHostKeyChecking=no -o BatchMode=yes') }}
-    {{ bigip_scp_user }}@{{ ansible_host }}:{{ bigip_ucs_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs
-    {{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs
-  args:
-    executable: /bin/bash
-  delegate_to: "{{ bastion_host }}"
-  become: true
-  when: bigip_snapshot_save_ucs | default(true) | bool
-  register: ucs_scp_result
-  # UCS files can be several hundred MB - allow 15 minutes
-  async: 900
-  poll: 15
-  ignore_errors: true
-
-- name: "BASTION_STORAGE | WARNING - UCS SCP failed (upgrade still succeeded)"
+- name: "BASTION_STORAGE | UCS fetched to EE"
   ansible.builtin.debug:
     msg: >-
-      WARNING: UCS SCP from {{ inventory_hostname }} to bastion failed.
-      Upgrade completed successfully. Retrieve UCS manually from:
-      {{ ansible_host }}:{{ bigip_ucs_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs
+      UCS downloaded to EE:
+      {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs
   when:
     - bigip_snapshot_save_ucs | default(true) | bool
-    - ucs_scp_result is failed
+    - ucs_fetch_result is not failed
 
 # -----------------------------------------------------------------------------
-# Confirm what landed on bastion
+# Step 4 - Copy UCS from EE -> bastion CIFS mount
+# Same pattern as the JSON copies above
+# -----------------------------------------------------------------------------
+
+- name: "BASTION_STORAGE | Copy UCS to bastion"
+  ansible.builtin.copy:
+    src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs"
+    dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs"
+    mode: '0644'
+  delegate_to: bastion01
+  become: true
+  when:
+    - bigip_snapshot_save_ucs | default(true) | bool
+    - ucs_fetch_result is not failed
+  register: ucs_copy_result
+  ignore_errors: true
+
+- name: "BASTION_STORAGE | WARNING - UCS copy to bastion failed (upgrade still succeeded)"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: UCS copy to bastion failed for {{ inventory_hostname }}.
+      Upgrade completed successfully. UCS is still on the EE at:
+      {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs
+  when:
+    - bigip_snapshot_save_ucs | default(true) | bool
+    - ucs_copy_result is defined
+    - ucs_copy_result is failed
+
+# -----------------------------------------------------------------------------
+# Step 5 - Confirm all files stored on bastion
 # -----------------------------------------------------------------------------
 
 - name: "BASTION_STORAGE | List files stored for this device"
@@ -127,12 +131,12 @@
     paths: "{{ bastion_device_backup_path }}"
     patterns: "{{ inventory_hostname }}_{{ snapshot_timestamp }}*"
   register: bastion_stored_files
-  delegate_to: "{{ bastion_host }}"
+  delegate_to: bastion01
 
 - name: "BASTION_STORAGE | Confirm files stored on bastion"
   ansible.builtin.debug:
     msg: >-
-      Files stored at {{ bastion_host }}:{{ bastion_device_backup_path }}
+      Files stored at bastion01:{{ bastion_device_backup_path }}
       {% for f in bastion_stored_files.files | sort(attribute='path') %}
         {{ f.path | basename }} ({{ (f.size / 1024) | round(1) }} KB)
       {% endfor %}

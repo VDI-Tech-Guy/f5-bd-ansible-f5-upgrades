@@ -20,9 +20,15 @@
 #   Credential : AAP Machine Credential for BIG-IP devices
 #   Extra Vars : paste contents of extra_vars/upgrade_vars.yml and update values
 #
-# The bastion host must exist in the [bastion] inventory group.
-# Its credentials come from the AAP Machine Credential bound to the Job Template.
-# extra_vars supply the bastion hostname and path overrides only.
+# Network topology:
+#   bastion  <-- SSH -->  AAP EE  <-- SSH/HTTPS -->  BIG-IP
+#   bastion has NO direct path to BIG-IP. All transfers route through the EE.
+#   Image:  bastion CIFS -> EE (fetch) -> BIG-IP (SCP from EE)
+#   Backup: BIG-IP -> EE (bigip_ucs_fetch) -> bastion CIFS (copy from EE)
+#
+# bastion01 is a standalone host in AAP inventory (no group).
+# Its credentials come from the AAP Machine Credential.
+# extra_vars supply CIFS paths and upgrade parameters only.
 # =============================================================================
 
 
@@ -44,8 +50,8 @@
       loop:
         - bigip_target_version
         - bigip_image_filename
-        - bastion_host
-        - bigip_scp_user
+        - bastion_image_path
+        - bastion_backup_root
       delegate_to: localhost
       run_once: false
 
@@ -131,8 +137,7 @@
                       .nestedStats.entries.Version.description | default('unknown') }} |
           Target: {{ bigip_target_version }} |
           Sync: {{ bigip_sync_state }} |
-          Timestamp: {{ snapshot_timestamp }} |
-          Bastion: {{ bastion_host }}
+          Timestamp: {{ snapshot_timestamp }}
 
 
 # =============================================================================

@@ -4,9 +4,15 @@
 # =============================================================================
 # AAP 2.6: Job Template > Extra Variables > paste this content, update values.
 #
-# Bastion connection (user, password, become) comes from the AAP Machine
-# Credential bound to the Job Template - not stored here.
-# These extra vars cover only upgrade-specific parameters and path overrides.
+# Network topology:
+#   bastion  <-- SSH -->  AAP EE  <-- SSH/HTTPS -->  BIG-IP
+#
+# The bastion has no direct path to BIG-IP. All transfers route through the EE:
+#   Image:  bastion CIFS -> fetch -> EE -> SCP -> BIG-IP /shared/images/
+#   Backup: BIG-IP -> bigip_ucs_fetch module -> EE -> copy -> bastion CIFS
+#
+# Bastion connection (user/password/become) comes from the AAP Machine
+# Credential. No connection vars belong in this file.
 # =============================================================================
 
 # =============================================================================
@@ -19,17 +25,11 @@ bigip_target_version: "17.1.1"
 # ISO filename - must exist at {{ bastion_image_path }}/{{ bigip_image_filename }}
 bigip_image_filename: "BIGIP-17.1.1-0.0.4.iso"
 
-# Inventory hostname of the bastion (must match the host in [bastion] group)
-bastion_host: "bastion01"
-
 # =============================================================================
-# BASTION - Path overrides
-# Defaults are set in group_vars/bastion.yml. Override here if this run uses
-# a different CIFS path (e.g. different software version folder).
+# BASTION - CIFS path vars
 # =============================================================================
 
 # Root of CIFS mount on bastion where BIG-IP ISOs are staged
-# Full image path: {{ bastion_image_path }}/{{ bigip_image_filename }}
 bastion_image_path: "/mnt/cifs/bigip-images"
 
 # Root of CIFS mount on bastion where backups are stored
@@ -37,39 +37,30 @@ bastion_image_path: "/mnt/cifs/bigip-images"
 bastion_backup_root: "/mnt/cifs/bigip-backups"
 
 # =============================================================================
-# BIG-IP SCP settings (bastion -> BIG-IP image transfer)
+# EE STAGING
+# Temporary working directory on the AAP EE runner.
+# Images are fetched here from bastion before SCP to BIG-IP, then deleted.
+# Snapshot JSONs and UCS files land here before being pushed to bastion.
 # =============================================================================
 
-# Destination path on BIG-IP for SCP'd image
-bigip_remote_image_path: "/shared/images"
+# Staging dir for image file transit (fetch from bastion, SCP to BIG-IP, then deleted)
+bigip_ee_staging_dir: "/runner/artifacts/images"
 
-# SSH user on BIG-IP the bastion will SCP as
-bigip_scp_user: "admin"
-
-# SSH port on BIG-IP management interface
-bigip_scp_port: 22
-
-# SCP options: no host key checking (BIG-IP keys change post-upgrade)
-bigip_scp_opts: "-o StrictHostKeyChecking=no -o BatchMode=yes"
+# Staging dir for snapshot JSON and UCS files before bastion push
+snapshot_output_dir: "/runner/artifacts/snapshots"
 
 # =============================================================================
 # INSTALL OPTIONS
 # =============================================================================
 
-# Boot volume to install to (HD1.2 = secondary, safe target)
 bigip_install_volume: "HD1.2"
-
-# Reboot into new volume immediately after install
 bigip_reboot_after_install: true
-
-# Set true to stage image and run checks but skip reboot
 bigip_upgrade_dry_run: false
 
 # =============================================================================
 # HA OPTIONS
 # =============================================================================
 
-# Set true to fail back to original active after both nodes are upgraded
 bigip_failback: false
 
 # =============================================================================
@@ -83,19 +74,16 @@ bigip_ssh_port: 22
 bigip_https_port: 443
 
 # =============================================================================
-# SNAPSHOT SETTINGS
+# SNAPSHOT / BACKUP SETTINGS
 # =============================================================================
 
-# Staging dir on AAP EE runner (persists for life of job run)
-snapshot_output_dir: "/runner/artifacts/snapshots"
-
-# Save UCS on BIG-IP during pre-snapshot (SCPed to bastion in Play 9)
+# Fetch UCS from BIG-IP and store on bastion
 bigip_snapshot_save_ucs: true
 
-# BIG-IP directory where UCS files are saved
+# BIG-IP directory where UCS files are saved before fetch
 bigip_ucs_path: "/var/local/ucs"
 
-# Fail post-snapshot play if regressions detected
+# Fail the post-snapshot play if regressions detected
 snapshot_fail_on_regression: true
 
 # Pool members allowed to be down post-upgrade (0 = none)
