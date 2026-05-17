@@ -3,47 +3,54 @@
 # BIG-IP HA Pair Upgrade Playbook
 # =============================================================================
 # Upgrade order:
-#   0. Pre-flight   - validate image exists, check sync state, detect ha_role
-#   1. Pre-snapshot - both units
-#   2. Upgrade standby unit → reboot → layered wait → post-snapshot standby
-#   3. Force failover (standby becomes active)
-#   4. Upgrade old-active (now standby) → reboot → layered wait
-#   5. Optional: failback to original active
-#   6. Post-snapshot both units → diff report
+#   0. Pre-flight    - validate extra_vars, detect live ha_role, set timestamps
+#   1. Image staging - bastion CIFS -> SCP -> both BIG-IP units
+#   2. Pre-snapshot  - both units (JSON written to EE runner)
+#   3. Upgrade standby  -> reboot -> layered wait -> verify standby clean
+#   4. Force failover   (standby becomes active)
+#   5. Upgrade old-active (now standby) -> reboot -> layered wait
+#   6. Optional failback
+#   7. Final post-snapshot + diff report (both units)
+#   8. Store all artifacts on bastion (JSON diffs + UCS)
 #
-# AAP 2.6 Usage:
+# AAP 2.6 Setup:
 #   Project    : f5-bd-ansible-f5-upgrades
 #   Playbook   : playbooks/BIG-IP/Upgrades/ha/upgrade.yaml
-#   Inventory  : your AAP inventory (hosts must be in bigip_ha or a child group)
-#   Extra Vars : paste contents of extra_vars/upgrade_vars.yml, set values
+#   Inventory  : [bigip_ha] group with device hosts only - NO bastion entry needed
+#   Credential : AAP Machine Credential for BIG-IP devices
+#   Extra Vars : paste contents of extra_vars/upgrade_vars.yml and update values
 #
-# Required extra vars:
-#   bigip_target_version   e.g. "17.1.1"
-#   bigip_image_filename   e.g. "BIGIP-17.1.1-0.0.4.iso"
-#
-# Inventory requirement:
-#   Each device in the HA pair SHOULD have ha_role=active or ha_role=standby
-#   set as a host variable. If not set, Play 0 will detect it dynamically
-#   from the live device state and set it as a fact for the remainder of the run.
+# The bastion host has NO inventory entry. All bastion connectivity is
+# driven entirely from extra_vars (bastion_host, bastion_user, etc.).
 # =============================================================================
 
+
 # =============================================================================
-# PLAY 0 - Pre-flight: detect live HA role, validate readiness
+# PLAY 0 - Pre-flight: validate extra_vars, detect live HA role, set timestamps
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 0: Pre-flight Checks & Dynamic HA Role Detection"
+- name: "BIG-IP HA Upgrade - Play 0: Pre-flight Checks & HA Role Detection"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   vars:
-    # snapshot_timestamp set ONCE here so pre and post files share the same stamp
-    snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+    _snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+    _backup_date: "{{ lookup('pipe', 'date +%Y-%m-%d') }}"
   tasks:
 
-    - name: "PREFLIGHT | Verify image file exists on Ansible controller"
-      ansible.builtin.stat:
-        path: "{{ bigip_image_local_path }}/{{ bigip_image_filename }}"
-      register: preflight_image_stat
+    - name: "PREFLIGHT | Validate required extra vars are set"
+      ansible.builtin.fail:
+        msg: "Missing required extra var: '{{ item }}' - set it in AAP Extra Variables."
+      when: vars[item] is not defined or vars[item] | string | length == 0
+      loop:
+        - bigip_target_version
+        - bigip_image_filename
+        - bastion_host
+        - bastion_user
+        - bastion_password
+        - bastion_image_path
+        - bastion_backup_root
+        - bigip_scp_user
       delegate_to: localhost
-      failed_when: not preflight_image_stat.stat.exists
+      run_once: false
 
     - name: "PREFLIGHT | Query live failover state from device"
       ansible.builtin.uri:
@@ -66,12 +73,6 @@
              .nestedStats.entries.status.description == 'active'
              else 'standby' }}
         cacheable: true
-      # This overrides any inventory ha_role with the live truth from the device.
-      # cacheable: true persists the fact across plays in this run.
-
-    - name: "PREFLIGHT | Display detected HA role"
-      ansible.builtin.debug:
-        msg: "{{ inventory_hostname }} ({{ ansible_host }}) - Live HA role: {{ ha_role }}"
 
     - name: "PREFLIGHT | Query config sync state"
       ansible.builtin.uri:
@@ -93,13 +94,13 @@
              ['https://localhost/mgmt/tm/cm/sync-status/0']
              .nestedStats.entries.status.description
              | default('unknown') }}
+        cacheable: true
 
-    - name: "PREFLIGHT | Abort if pair is not In Sync before upgrade"
+    - name: "PREFLIGHT | Abort if pair is not In Sync"
       ansible.builtin.fail:
         msg: >-
-          PREFLIGHT FAILED: {{ inventory_hostname }} reports sync state '{{ bigip_sync_state }}'.
-          The HA pair must be 'In Sync' before starting an upgrade.
-          Resolve sync issues and re-run.
+          PREFLIGHT FAILED: {{ inventory_hostname }} sync state is '{{ bigip_sync_state }}'.
+          The HA pair must be 'In Sync' before upgrade. Resolve and re-run.
       when:
         - bigip_sync_state != 'In Sync'
         - not bigip_upgrade_dry_run | default(false) | bool
@@ -117,27 +118,41 @@
       delegate_to: localhost
       no_log: true
 
-    - name: "PREFLIGHT | Display current version"
-      ansible.builtin.debug:
-        msg: >-
-          {{ inventory_hostname }} | HA role: {{ ha_role }} |
-          Current version: {{ preflight_version_query.json.entries
-                              ['https://localhost/mgmt/tm/sys/version/0']
-                              .nestedStats.entries.Version.description
-                              | default('unknown') }} |
-          Target version: {{ bigip_target_version }} |
-          Sync state: {{ bigip_sync_state }}
-
-    - name: "PREFLIGHT | Set snapshot_timestamp fact for use across all plays"
+    - name: "PREFLIGHT | Cache snapshot_timestamp and backup_date across all plays"
       ansible.builtin.set_fact:
-        snapshot_timestamp: "{{ snapshot_timestamp }}"
+        snapshot_timestamp: "{{ _snapshot_timestamp }}"
+        backup_date: "{{ _backup_date }}"
         cacheable: true
 
+    - name: "PREFLIGHT | Summary"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}) |
+          HA role: {{ ha_role }} |
+          Version: {{ preflight_version_query.json.entries
+                      ['https://localhost/mgmt/tm/sys/version/0']
+                      .nestedStats.entries.Version.description | default('unknown') }} |
+          Target: {{ bigip_target_version }} |
+          Sync: {{ bigip_sync_state }} |
+          Timestamp: {{ snapshot_timestamp }} |
+          Bastion: {{ bastion_host }}
+
 
 # =============================================================================
-# PLAY 1 - Pre-snapshot: both units
+# PLAY 1 - Image staging: bastion CIFS -> SCP -> both BIG-IP units
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 1: Pre-Snapshot (Both Units)"
+- name: "BIG-IP HA Upgrade - Play 1: Stage Image on Both Units via Bastion"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  roles:
+    - role: bastion_image_push
+  tags: [image, image_push]
+
+
+# =============================================================================
+# PLAY 2 - Pre-snapshot: both units
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 2: Pre-Snapshot (Both Units)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   roles:
@@ -146,9 +161,9 @@
 
 
 # =============================================================================
-# PLAY 2 - Upgrade standby unit
+# PLAY 3 - Upgrade standby unit
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 2: Upgrade Standby Unit"
+- name: "BIG-IP HA Upgrade - Play 3: Upgrade Standby Unit"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:
@@ -156,9 +171,9 @@
       ansible.builtin.meta: end_host
       when: ha_role | default('unknown') != 'standby'
 
-    - name: "UPGRADE STANDBY | Confirm standby identity before proceeding"
+    - name: "UPGRADE STANDBY | Confirm identity"
       ansible.builtin.debug:
-        msg: "Proceeding with upgrade on STANDBY unit: {{ inventory_hostname }} ({{ ansible_host }})"
+        msg: "Upgrading STANDBY: {{ inventory_hostname }} ({{ ansible_host }})"
   roles:
     - role: bigip_upgrade
     - role: bigip_wait
@@ -166,9 +181,9 @@
 
 
 # =============================================================================
-# PLAY 3 - Post-snapshot standby (verify standby came back clean before failover)
+# PLAY 4 - Verify standby came back clean before proceeding to failover
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 3: Post-Snapshot Standby Verification"
+- name: "BIG-IP HA Upgrade - Play 4: Verify Standby Came Back Clean"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:
@@ -182,21 +197,17 @@
 
 
 # =============================================================================
-# PLAY 4 - Force failover: active yields to upgraded standby
+# PLAY 5 - Force failover: active yields to upgraded standby
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 4: Force Failover to Upgraded Standby"
+- name: "BIG-IP HA Upgrade - Play 5: Force Failover to Upgraded Standby"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:
     - name: "Skip - this host is not the active unit"
       ansible.builtin.meta: end_host
       when: ha_role | default('unknown') != 'active'
-
-    - name: "FAILOVER | Confirm active identity before triggering failover"
-      ansible.builtin.debug:
-        msg: "Triggering failover FROM active unit: {{ inventory_hostname }} ({{ ansible_host }})"
   tasks:
-    - name: "FAILOVER | Send 'run sys failover standby' command"
+    - name: "FAILOVER | Trigger failover via REST API"
       ansible.builtin.uri:
         url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover"
         method: POST
@@ -208,23 +219,24 @@
         body:
           command: run
           standby: true
-        status_code: [200, 202, -1]  # -1 = connection dropped - expected
+        # -1 catches the connection drop that happens immediately on failover
+        status_code: [200, 202, -1]
       delegate_to: localhost
-      ignore_errors: true  # Connection drops immediately - expected
+      ignore_errors: true
       when: not bigip_upgrade_dry_run | default(false) | bool
       no_log: true
 
-    - name: "FAILOVER | Dry-run mode - skipping failover"
+    - name: "FAILOVER | Dry-run - skipping"
       ansible.builtin.debug:
         msg: "DRY RUN: Would trigger failover on {{ inventory_hostname }}"
       when: bigip_upgrade_dry_run | default(false) | bool
 
-    - name: "FAILOVER | Wait for failover to complete (30s)"
+    - name: "FAILOVER | Pause 30s for failover to settle"
       ansible.builtin.pause:
         seconds: 30
       when: not bigip_upgrade_dry_run | default(false) | bool
 
-    - name: "FAILOVER | Verify new active/standby state on both units"
+    - name: "FAILOVER | Confirm new HA state"
       ansible.builtin.uri:
         url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
         method: GET
@@ -238,21 +250,20 @@
       no_log: true
       when: not bigip_upgrade_dry_run | default(false) | bool
 
-    - name: "FAILOVER | Display new HA state after failover"
+    - name: "FAILOVER | Display new state"
       ansible.builtin.debug:
         msg: >-
           {{ inventory_hostname }} post-failover state: {{ post_failover_state.json.entries
              ['https://localhost/mgmt/tm/sys/failover/0']
-             .nestedStats.entries.status.description
-             | default('unknown') }}
+             .nestedStats.entries.status.description | default('unknown') }}
       when: not bigip_upgrade_dry_run | default(false) | bool
   tags: [upgrade, failover]
 
 
 # =============================================================================
-# PLAY 5 - Upgrade old-active (now standby after failover)
+# PLAY 6 - Upgrade old-active (now standby after failover)
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 5: Upgrade Old-Active (Now Standby)"
+- name: "BIG-IP HA Upgrade - Play 6: Upgrade Old-Active (Now Standby)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:
@@ -260,11 +271,11 @@
       ansible.builtin.meta: end_host
       when: ha_role | default('unknown') != 'active'
 
-    - name: "UPGRADE ACTIVE | Confirm identity before proceeding"
+    - name: "UPGRADE ACTIVE | Confirm identity"
       ansible.builtin.debug:
         msg: >-
-          Proceeding with upgrade on original ACTIVE unit (now standby
-          after failover): {{ inventory_hostname }} ({{ ansible_host }})
+          Upgrading original ACTIVE (now standby after failover):
+          {{ inventory_hostname }} ({{ ansible_host }})
   roles:
     - role: bigip_upgrade
     - role: bigip_wait
@@ -272,21 +283,21 @@
 
 
 # =============================================================================
-# PLAY 6 - Optional: failback to original active unit
+# PLAY 7 - Optional failback to original active
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 6: Optional Failback to Original Active"
+- name: "BIG-IP HA Upgrade - Play 7: Optional Failback to Original Active"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:
-    - name: "Skip failback - not requested (bigip_failback is false)"
+    - name: "Skip - failback not requested"
       ansible.builtin.meta: end_host
       when: not bigip_failback | default(false) | bool
 
-    - name: "Skip failback - this host is not the original standby (now active)"
+    - name: "Skip - this host is not the original standby (now active)"
       ansible.builtin.meta: end_host
       when: ha_role | default('unknown') != 'standby'
   tasks:
-    - name: "FAILBACK | Trigger failback to original active"
+    - name: "FAILBACK | Trigger failback"
       ansible.builtin.uri:
         url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover"
         method: POST
@@ -303,19 +314,31 @@
       ignore_errors: true
       no_log: true
 
-    - name: "FAILBACK | Wait for failback to complete (30s)"
+    - name: "FAILBACK | Pause 30s to settle"
       ansible.builtin.pause:
         seconds: 30
   tags: [upgrade, failback]
 
 
 # =============================================================================
-# PLAY 7 - Final post-snapshot: both units + diff report
+# PLAY 8 - Final post-snapshot + diff report (both units)
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 7: Final Post-Snapshot & Diff Report (Both Units)"
+- name: "BIG-IP HA Upgrade - Play 8: Final Post-Snapshot & Diff Report (Both Units)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   roles:
     - role: snapshot_post
     - role: snapshot_report
   tags: [snapshot, post_snapshot, report]
+
+
+# =============================================================================
+# PLAY 9 - Store all artifacts on bastion (JSON diffs + UCS backups)
+# Structure: {{ bastion_backup_root }}/<hostname>/<date>/
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 9: Store Artifacts on Bastion"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  roles:
+    - role: bastion_storage
+  tags: [storage, bastion_storage]

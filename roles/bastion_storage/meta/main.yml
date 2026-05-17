@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: bastion_storage
+  author: f5networks
+  description: >
+    Stores snapshot JSON diffs and UCS backup files on the bastion host
+    under a per-device, per-date directory structure on the CIFS-mounted
+    backup share. Called after snapshot_post completes.
+  min_ansible_version: "2.9"
+collections:
+  - ansible.builtin
+dependencies: []

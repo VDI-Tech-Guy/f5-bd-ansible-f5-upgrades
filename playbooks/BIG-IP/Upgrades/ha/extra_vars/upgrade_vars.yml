@@ -1,90 +1,143 @@
 ---
 # =============================================================================
-# BIG-IP HA Upgrade - AAP Extra Variables Template
+# BIG-IP HA Upgrade - AAP Extra Variables
 # =============================================================================
-# In AAP 2.6: Job Template > Extra Variables > paste this file contents,
-# then update the values for your specific upgrade.
+# AAP 2.6: Job Template > Extra Variables > paste this content, update values.
 #
-# Connection variables (ansible_user, ansible_password, ansible_connection etc.)
-# belong in your AAP Credential and inventory group_vars - NOT here.
-# This file contains only upgrade-specific runtime parameters.
+# This file is the SINGLE source of truth for every variable the playbook
+# needs. There are no dependencies on inventory groups, group_vars, or
+# host_vars beyond the BIG-IP device connection vars (which come from the
+# AAP Machine Credential and bigip group_vars in inventory).
+#
+# The bastion host has NO inventory entry. All bastion connectivity is
+# defined here and tasks reach it via an ad-hoc SSH connection built from
+# these vars using delegate_to with ansible_*_override vars.
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# REQUIRED - Set these for every upgrade run
-# -----------------------------------------------------------------------------
+# =============================================================================
+# REQUIRED - Must be set for every upgrade run
+# =============================================================================
 
 # Target BIG-IP software version (used for post-upgrade verification)
 bigip_target_version: "17.1.1"
 
-# ISO filename - must exist in bigip_image_local_path on the EE / controller
+# ISO filename - must exist at {{ bastion_image_path }}/{{ bigip_image_filename }}
 bigip_image_filename: "BIGIP-17.1.1-0.0.4.iso"
 
-# -----------------------------------------------------------------------------
-# Image paths
-# -----------------------------------------------------------------------------
+# =============================================================================
+# BASTION - Connection
+# All bastion tasks use delegate_to: localhost with these vars injected as
+# ansible_*_override on the task level, so no inventory entry is needed.
+# =============================================================================
 
-# Path where upgrade ISOs are staged (on Ansible controller / EE)
-bigip_image_local_path: "/mnt/software/bigip"
+# Bastion management IP or FQDN
+bastion_host: "192.170.7.50"
 
-# -----------------------------------------------------------------------------
-# Install options
-# -----------------------------------------------------------------------------
+# Bastion SSH credentials
+bastion_user: "lab_admin"
+bastion_password: "P@S$w0RD!"
+
+# Bastion privilege escalation
+bastion_become: true
+bastion_become_method: "sudo"
+bastion_become_password: "P@S$w0RD!"
+
+# Bastion SSH port (default 22)
+bastion_ssh_port: 22
+
+# =============================================================================
+# BASTION - Image staging paths
+# =============================================================================
+
+# Root path on bastion where CIFS share is mounted containing BIG-IP ISOs
+# Full image path: {{ bastion_image_path }}/{{ bigip_image_filename }}
+bastion_image_path: "/mnt/cifs/bigip-images"
+
+# Destination path on BIG-IP for SCP transfer
+# /shared/images is the standard BIG-IP location for SCP-based image delivery
+bigip_remote_image_path: "/shared/images"
+
+# SSH user on BIG-IP that bastion will SCP as (needs write access to /shared/images)
+bigip_scp_user: "admin"
+
+# SSH port on BIG-IP management interface used for SCP
+bigip_scp_port: 22
+
+# SCP options passed on every scp command from bastion to BIG-IP
+# StrictHostKeyChecking=no: BIG-IP host keys change after upgrade - don't block
+# BatchMode=yes: fail immediately rather than hang on password prompt
+bigip_scp_opts: "-o StrictHostKeyChecking=no -o BatchMode=yes"
+
+# =============================================================================
+# BASTION - Backup storage paths
+# =============================================================================
+
+# Root path on bastion (CIFS mount) where backups are stored
+# Files are organised as: {{ bastion_backup_root }}/<device-hostname>/<date>/
+#   - <hostname>_<timestamp>_pre.json
+#   - <hostname>_<timestamp>_post.json
+#   - <hostname>_<timestamp>_diff.json
+#   - <hostname>_<timestamp>_pre_upgrade.ucs
+bastion_backup_root: "/mnt/cifs/bigip-backups"
+
+# =============================================================================
+# INSTALL OPTIONS
+# =============================================================================
 
 # Boot volume to install to
-# HD1.1 = primary (currently running) - do NOT install here
-# HD1.2 = secondary (install target)
+# HD1.1 = primary (currently running) - do NOT use as install target
+# HD1.2 = secondary (safe install target)
 bigip_install_volume: "HD1.2"
 
-# Reboot into new volume immediately after install
+# Reboot into new volume immediately after install completes
 bigip_reboot_after_install: true
 
-# Set true to stage image and run all checks but skip actual reboot
+# Set true to run all checks and stage image but skip reboot (dry run)
 bigip_upgrade_dry_run: false
 
-# -----------------------------------------------------------------------------
-# HA options
-# -----------------------------------------------------------------------------
+# =============================================================================
+# HA OPTIONS
+# =============================================================================
 
 # Set true to fail back to original active unit after both nodes are upgraded
 bigip_failback: false
 
-# -----------------------------------------------------------------------------
-# Wait / reboot timing
-# Increase these for slower environments or chassis-based hardware
-# -----------------------------------------------------------------------------
+# =============================================================================
+# WAIT / REBOOT TIMING
+# Increase for slower hardware or high-latency management networks
+# =============================================================================
 
-# Seconds to wait after reboot trigger before starting port probes
+# Seconds to wait after reboot trigger before starting any port probes
 bigip_reboot_initial_delay: 60
 
 # Seconds between REST readiness probe retries (/mgmt/shared/echo)
 bigip_wait_retry_delay: 20
 
-# Maximum REST probe retries (30 * 20s = 10 min max wait per device)
+# Maximum REST probe retries before failing (30 x 20s = 10 min per device)
 bigip_wait_max_retries: 30
 
-# Management port values (override if your devices use non-standard ports)
+# BIG-IP management ports (override if non-standard)
 bigip_ssh_port: 22
 bigip_https_port: 443
 
-# -----------------------------------------------------------------------------
-# Snapshot settings
-# -----------------------------------------------------------------------------
+# =============================================================================
+# SNAPSHOT SETTINGS
+# =============================================================================
 
-# Directory on the controller / EE where snapshot JSON files are written.
-# In AAP 2.6 with EEs, use /runner/artifacts or a path on shared storage
-# if you need snapshots to persist beyond the job run.
+# Staging dir on AAP EE runner where snapshot JSONs are written before bastion push
+# /runner/artifacts persists for the life of the AAP job run
 snapshot_output_dir: "/runner/artifacts/snapshots"
 
-# Save a UCS backup on the device as part of pre-snapshot
+# Save a UCS backup on the BIG-IP during pre-snapshot phase
+# The UCS is then SCPed directly from BIG-IP to bastion (bypasses EE)
 bigip_snapshot_save_ucs: true
 
-# Directory on the BIG-IP where UCS files are stored
+# Directory on BIG-IP where UCS files are stored
 bigip_ucs_path: "/var/local/ucs"
 
 # Fail the post-snapshot play if regressions are detected
-# Set false to generate the report but not halt the playbook
+# Set false to generate the diff report but continue the playbook
 snapshot_fail_on_regression: true
 
-# Allowed percentage of pool members that can be down post-upgrade (0 = none)
+# Percentage of pool members allowed to be down post-upgrade (0 = none)
 snapshot_pool_member_down_threshold_pct: 0

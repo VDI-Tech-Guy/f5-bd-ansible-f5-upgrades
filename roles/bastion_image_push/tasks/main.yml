@@ -1,0 +1,135 @@
+---
+# =============================================================================
+# bastion_image_push - SCP image from bastion CIFS mount to BIG-IP
+# =============================================================================
+# The bastion is NOT in inventory. Tasks that run on it use:
+#   delegate_to: localhost
+#   vars:
+#     ansible_connection: ssh
+#     ansible_host: "{{ bastion_host }}"
+#     ansible_user: "{{ bastion_user }}"
+#     ansible_password: "{{ bastion_password }}"
+#     ansible_become: "{{ bastion_become }}"
+#     ansible_become_method: "{{ bastion_become_method }}"
+#     ansible_become_password: "{{ bastion_become_password }}"
+#     ansible_port: "{{ bastion_ssh_port }}"
+#
+# This pattern establishes a fresh SSH connection to the bastion for each
+# task that needs it, driven entirely from extra_vars - no inventory entry
+# or group_vars required.
+#
+# Flow:
+#   1. Verify image exists on bastion CIFS mount
+#   2. Check if image already on BIG-IP (idempotent - skip SCP if so)
+#   3. SCP image bastion -> BIG-IP /shared/images/ (async, up to 30 min)
+#   4. Poll BIG-IP REST until image status is 'verified'
+# =============================================================================
+
+- name: "BASTION_PUSH | Verify image exists on bastion CIFS mount"
+  ansible.builtin.stat:
+    path: "{{ bastion_image_path }}/{{ bigip_image_filename }}"
+  register: bastion_image_stat
+  delegate_to: localhost
+  vars:
+    ansible_connection: ssh
+    ansible_host: "{{ bastion_host }}"
+    ansible_user: "{{ bastion_user }}"
+    ansible_password: "{{ bastion_password }}"
+    ansible_become: "{{ bastion_become }}"
+    ansible_become_method: "{{ bastion_become_method }}"
+    ansible_become_password: "{{ bastion_become_password }}"
+    ansible_port: "{{ bastion_ssh_port | default(22) }}"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+  failed_when: not bastion_image_stat.stat.exists
+  no_log: true
+
+- name: "BASTION_PUSH | Image confirmed on bastion"
+  ansible.builtin.debug:
+    msg: >-
+      Image found on bastion ({{ bastion_host }}):
+      {{ bastion_image_path }}/{{ bigip_image_filename }}
+      ({{ (bastion_image_stat.stat.size / 1024 / 1024) | round(1) }} MB)
+
+- name: "BASTION_PUSH | Check if image already registered on BIG-IP"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/software/image"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: bigip_existing_images
+  delegate_to: localhost
+  no_log: true
+
+- name: "BASTION_PUSH | Set image_already_present fact"
+  ansible.builtin.set_fact:
+    bigip_image_already_present: >-
+      {{ bigip_existing_images.json.items
+         | default([])
+         | selectattr('name', 'defined')
+         | selectattr('name', 'equalto', bigip_image_filename)
+         | list | length > 0 }}
+
+- name: "BASTION_PUSH | Image already on BIG-IP - skipping SCP"
+  ansible.builtin.debug:
+    msg: "{{ bigip_image_filename }} already present on {{ inventory_hostname }} - skipping transfer."
+  when: bigip_image_already_present | bool
+
+- name: "BASTION_PUSH | SCP image from bastion to BIG-IP /shared/images/"
+  ansible.builtin.shell: >
+    scp -P {{ bigip_scp_port | default(22) }}
+    {{ bigip_scp_opts | default('-o StrictHostKeyChecking=no -o BatchMode=yes') }}
+    {{ bastion_image_path }}/{{ bigip_image_filename }}
+    {{ bigip_scp_user }}@{{ ansible_host }}:{{ bigip_remote_image_path }}/{{ bigip_image_filename }}
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  vars:
+    ansible_connection: ssh
+    ansible_host: "{{ bastion_host }}"
+    ansible_user: "{{ bastion_user }}"
+    ansible_password: "{{ bastion_password }}"
+    ansible_become: "{{ bastion_become }}"
+    ansible_become_method: "{{ bastion_become_method }}"
+    ansible_become_password: "{{ bastion_become_password }}"
+    ansible_port: "{{ bastion_ssh_port | default(22) }}"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+  when: not bigip_image_already_present | bool
+  register: bastion_scp_result
+  # BIG-IP ISOs are ~2GB - allow up to 30 minutes
+  async: 1800
+  poll: 30
+  no_log: true
+
+- name: "BASTION_PUSH | SCP transfer complete"
+  ansible.builtin.debug:
+    msg: >-
+      Transfer complete: {{ bigip_image_filename }}
+      -> {{ inventory_hostname }} ({{ ansible_host }}):{{ bigip_remote_image_path }}/
+  when: not bigip_image_already_present | bool
+
+- name: "BASTION_PUSH | Poll BIG-IP until image is verified and ready"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/software/image/{{ bigip_image_filename }}"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: bigip_image_verify
+  until:
+    - bigip_image_verify.status == 200
+    - bigip_image_verify.json.status is defined
+    - bigip_image_verify.json.status == 'verified'
+  retries: 30
+  delay: 15
+  delegate_to: localhost
+  no_log: true
+  when: not bigip_image_already_present | bool
+
+- name: "BASTION_PUSH | Image verified and ready on BIG-IP"
+  ansible.builtin.debug:
+    msg: "{{ bigip_image_filename }} is verified and ready on {{ inventory_hostname }} ({{ ansible_host }})."

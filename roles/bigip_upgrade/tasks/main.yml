@@ -7,12 +7,9 @@
 # Pre-flight checks
 # -----------------------------------------------------------------------------
 
-- name: "UPGRADE | Verify image file exists on controller"
-  ansible.builtin.stat:
-    path: "{{ bigip_image_local_path }}/{{ bigip_image_filename }}"
-  register: bigip_image_stat
-  delegate_to: localhost
-  failed_when: not bigip_image_stat.stat.exists
+# Image staging (CIFS -> bastion -> BIG-IP /shared/images/) is handled by
+# the bastion_image_push role which runs BEFORE this role in the playbook.
+# By the time we get here the image is already on the BIG-IP and verified.
 
 - name: "UPGRADE | Check current running version"
   ansible.builtin.uri:
@@ -42,67 +39,8 @@
   ansible.builtin.meta: end_host
   when: bigip_current_version is defined and bigip_target_version in bigip_current_version
 
-# -----------------------------------------------------------------------------
-# Check if image already exists on the device (avoid re-upload)
-# -----------------------------------------------------------------------------
-
-- name: "UPGRADE | Check if image already present on device"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/software/image"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: bigip_existing_images
-  delegate_to: localhost
-  no_log: true
-
-- name: "UPGRADE | Set image_already_present fact"
-  ansible.builtin.set_fact:
-    bigip_image_already_present: >-
-      {{ bigip_existing_images.json.items
-         | default([])
-         | selectattr('name', 'defined')
-         | selectattr('name', 'equalto', bigip_image_filename)
-         | list | length > 0 }}
-
-- name: "UPGRADE | Image already on device - skipping upload"
-  ansible.builtin.debug:
-    msg: "Image {{ bigip_image_filename }} already present on {{ ansible_host }} - skipping upload"
-  when: bigip_image_already_present | bool
-
-# -----------------------------------------------------------------------------
-# Upload image (chunked via iControl REST)
-# -----------------------------------------------------------------------------
-
-- name: "UPGRADE | Upload image to device"
-  f5networks.f5_bigip.bigip_software_image:
-    image: "{{ bigip_image_local_path }}/{{ bigip_image_filename }}"
-    state: present
-  when: not bigip_image_already_present | bool
-  register: bigip_image_upload
-
-- name: "UPGRADE | Wait for image to be ready post-upload"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/software/image/{{ bigip_image_filename }}"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: bigip_image_ready
-  until:
-    - bigip_image_ready.status == 200
-    - bigip_image_ready.json.status is defined
-    - bigip_image_ready.json.status == 'verified'
-  retries: 30
-  delay: 10
-  delegate_to: localhost
-  no_log: true
-  when: not bigip_image_already_present | bool
+# Image is already on BIG-IP /shared/images/ and verified by bastion_image_push.
+# Confirm image is visible to the software subsystem before proceeding to install.
 
 # -----------------------------------------------------------------------------
 # Install to boot volume
