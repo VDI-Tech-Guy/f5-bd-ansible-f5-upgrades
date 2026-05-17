@@ -3,115 +3,318 @@
 # BIG-IP HA Pair Upgrade Playbook
 # =============================================================================
 # Upgrade order:
-#   1. Pre-snapshot both units
-#   2. Upgrade standby unit → wait → verify
+#   0. Pre-flight   - validate image exists, check sync state, detect ha_role
+#   1. Pre-snapshot - both units
+#   2. Upgrade standby unit → reboot → layered wait → post-snapshot standby
 #   3. Force failover (standby becomes active)
-#   4. Upgrade old-active (now standby) → wait → verify
-#   5. Optional: fail back to original active
+#   4. Upgrade old-active (now standby) → reboot → layered wait
+#   5. Optional: failback to original active
 #   6. Post-snapshot both units → diff report
 #
-# Usage:
-#   ansible-playbook playbooks/BIG-IP/Upgrades/ha/upgrade.yaml \
-#     -i inventory/hosts.ini \
-#     -e "bigip_target_version=17.1.1 bigip_image_filename=BIGIP-17.1.1-0.0.4.iso" \
-#     --limit bigip_ha_pair01
+# AAP 2.6 Usage:
+#   Project    : f5-bd-ansible-f5-upgrades
+#   Playbook   : playbooks/BIG-IP/Upgrades/ha/upgrade.yaml
+#   Inventory  : your AAP inventory (hosts must be in bigip_ha or a child group)
+#   Extra Vars : paste contents of extra_vars/upgrade_vars.yml, set values
+#
+# Required extra vars:
+#   bigip_target_version   e.g. "17.1.1"
+#   bigip_image_filename   e.g. "BIGIP-17.1.1-0.0.4.iso"
 #
 # Inventory requirement:
-#   Each device in the HA pair must have ha_role=active or ha_role=standby set.
-#
-# Extra vars:
-#   bigip_target_version    - Version string to verify post-upgrade
-#   bigip_image_filename    - ISO filename in bigip_image_local_path
-#   bigip_failback          - Set 'true' to fail back after upgrade (default: false)
-#   bigip_upgrade_dry_run   - Set 'true' to skip reboots (default: false)
+#   Each device in the HA pair SHOULD have ha_role=active or ha_role=standby
+#   set as a host variable. If not set, Play 0 will detect it dynamically
+#   from the live device state and set it as a fact for the remainder of the run.
 # =============================================================================
 
-- name: "BIG-IP HA Upgrade - Pre-Snapshot (Both Units)"
+# =============================================================================
+# PLAY 0 - Pre-flight: detect live HA role, validate readiness
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 0: Pre-flight Checks & Dynamic HA Role Detection"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   vars:
-    snapshot_phase: pre
+    # snapshot_timestamp set ONCE here so pre and post files share the same stamp
     snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+  tasks:
+
+    - name: "PREFLIGHT | Verify image file exists on Ansible controller"
+      ansible.builtin.stat:
+        path: "{{ bigip_image_local_path }}/{{ bigip_image_filename }}"
+      register: preflight_image_stat
+      delegate_to: localhost
+      failed_when: not preflight_image_stat.stat.exists
+
+    - name: "PREFLIGHT | Query live failover state from device"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
+        method: GET
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+      register: preflight_failover_query
+      delegate_to: localhost
+      no_log: true
+
+    - name: "PREFLIGHT | Set ha_role fact from live device state"
+      ansible.builtin.set_fact:
+        ha_role: >-
+          {{ 'active' if preflight_failover_query.json.entries
+             ['https://localhost/mgmt/tm/sys/failover/0']
+             .nestedStats.entries.status.description == 'active'
+             else 'standby' }}
+        cacheable: true
+      # This overrides any inventory ha_role with the live truth from the device.
+      # cacheable: true persists the fact across plays in this run.
+
+    - name: "PREFLIGHT | Display detected HA role"
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}) - Live HA role: {{ ha_role }}"
+
+    - name: "PREFLIGHT | Query config sync state"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/cm/sync-status/stats"
+        method: GET
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+      register: preflight_sync_query
+      delegate_to: localhost
+      no_log: true
+
+    - name: "PREFLIGHT | Set sync state fact"
+      ansible.builtin.set_fact:
+        bigip_sync_state: >-
+          {{ preflight_sync_query.json.entries
+             ['https://localhost/mgmt/tm/cm/sync-status/0']
+             .nestedStats.entries.status.description
+             | default('unknown') }}
+
+    - name: "PREFLIGHT | Abort if pair is not In Sync before upgrade"
+      ansible.builtin.fail:
+        msg: >-
+          PREFLIGHT FAILED: {{ inventory_hostname }} reports sync state '{{ bigip_sync_state }}'.
+          The HA pair must be 'In Sync' before starting an upgrade.
+          Resolve sync issues and re-run.
+      when:
+        - bigip_sync_state != 'In Sync'
+        - not bigip_upgrade_dry_run | default(false) | bool
+
+    - name: "PREFLIGHT | Query current software version"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/version"
+        method: GET
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+      register: preflight_version_query
+      delegate_to: localhost
+      no_log: true
+
+    - name: "PREFLIGHT | Display current version"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} | HA role: {{ ha_role }} |
+          Current version: {{ preflight_version_query.json.entries
+                              ['https://localhost/mgmt/tm/sys/version/0']
+                              .nestedStats.entries.Version.description
+                              | default('unknown') }} |
+          Target version: {{ bigip_target_version }} |
+          Sync state: {{ bigip_sync_state }}
+
+    - name: "PREFLIGHT | Set snapshot_timestamp fact for use across all plays"
+      ansible.builtin.set_fact:
+        snapshot_timestamp: "{{ snapshot_timestamp }}"
+        cacheable: true
+
+
+# =============================================================================
+# PLAY 1 - Pre-snapshot: both units
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 1: Pre-Snapshot (Both Units)"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
   roles:
     - role: snapshot_pre
   tags: [snapshot, pre_snapshot]
 
-- name: "BIG-IP HA Upgrade - Upgrade Standby Unit"
+
+# =============================================================================
+# PLAY 2 - Upgrade standby unit
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 2: Upgrade Standby Unit"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
-  vars:
-    # Only target the standby unit in this play
-    ansible_limit_ha_role: standby
   pre_tasks:
-    - name: "Skip if this host is not the standby"
+    - name: "Skip - this host is not the standby"
       ansible.builtin.meta: end_host
-      when: ha_role != 'standby'
+      when: ha_role | default('unknown') != 'standby'
+
+    - name: "UPGRADE STANDBY | Confirm standby identity before proceeding"
+      ansible.builtin.debug:
+        msg: "Proceeding with upgrade on STANDBY unit: {{ inventory_hostname }} ({{ ansible_host }})"
   roles:
     - role: bigip_upgrade
     - role: bigip_wait
   tags: [upgrade, upgrade_standby]
 
-- name: "BIG-IP HA Upgrade - Force Failover to Standby"
+
+# =============================================================================
+# PLAY 3 - Post-snapshot standby (verify standby came back clean before failover)
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 3: Post-Snapshot Standby Verification"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:
-    - name: "Skip if this host is not the active unit"
+    - name: "Skip - this host is not the standby"
       ansible.builtin.meta: end_host
-      when: ha_role != 'active'
-  tasks:
-    - name: "Trigger failover - active unit yields to standby"
-      f5networks.f5_bigip.bigip_command:
-        commands:
-          - "run /sys failover standby"
-      when: not bigip_upgrade_dry_run | bool
-      ignore_errors: true   # Connection drops immediately on failover - expected
+      when: ha_role | default('unknown') != 'standby'
+  roles:
+    - role: snapshot_post
+    - role: snapshot_report
+  tags: [snapshot, post_snapshot_standby]
 
-    - name: "Pause to allow failover to complete"
+
+# =============================================================================
+# PLAY 4 - Force failover: active yields to upgraded standby
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 4: Force Failover to Upgraded Standby"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  pre_tasks:
+    - name: "Skip - this host is not the active unit"
+      ansible.builtin.meta: end_host
+      when: ha_role | default('unknown') != 'active'
+
+    - name: "FAILOVER | Confirm active identity before triggering failover"
+      ansible.builtin.debug:
+        msg: "Triggering failover FROM active unit: {{ inventory_hostname }} ({{ ansible_host }})"
+  tasks:
+    - name: "FAILOVER | Send 'run sys failover standby' command"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover"
+        method: POST
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          command: run
+          standby: true
+        status_code: [200, 202, -1]  # -1 = connection dropped - expected
+      delegate_to: localhost
+      ignore_errors: true  # Connection drops immediately - expected
+      when: not bigip_upgrade_dry_run | default(false) | bool
+      no_log: true
+
+    - name: "FAILOVER | Dry-run mode - skipping failover"
+      ansible.builtin.debug:
+        msg: "DRY RUN: Would trigger failover on {{ inventory_hostname }}"
+      when: bigip_upgrade_dry_run | default(false) | bool
+
+    - name: "FAILOVER | Wait for failover to complete (30s)"
       ansible.builtin.pause:
         seconds: 30
-      when: not bigip_upgrade_dry_run | bool
+      when: not bigip_upgrade_dry_run | default(false) | bool
+
+    - name: "FAILOVER | Verify new active/standby state on both units"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
+        method: GET
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+      register: post_failover_state
+      delegate_to: localhost
+      no_log: true
+      when: not bigip_upgrade_dry_run | default(false) | bool
+
+    - name: "FAILOVER | Display new HA state after failover"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} post-failover state: {{ post_failover_state.json.entries
+             ['https://localhost/mgmt/tm/sys/failover/0']
+             .nestedStats.entries.status.description
+             | default('unknown') }}
+      when: not bigip_upgrade_dry_run | default(false) | bool
   tags: [upgrade, failover]
 
-- name: "BIG-IP HA Upgrade - Upgrade Old-Active (Now Standby)"
+
+# =============================================================================
+# PLAY 5 - Upgrade old-active (now standby after failover)
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 5: Upgrade Old-Active (Now Standby)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:
-    - name: "Skip if this host is not the original active"
+    - name: "Skip - this host is not the original active"
       ansible.builtin.meta: end_host
-      when: ha_role != 'active'
+      when: ha_role | default('unknown') != 'active'
+
+    - name: "UPGRADE ACTIVE | Confirm identity before proceeding"
+      ansible.builtin.debug:
+        msg: >-
+          Proceeding with upgrade on original ACTIVE unit (now standby
+          after failover): {{ inventory_hostname }} ({{ ansible_host }})
   roles:
     - role: bigip_upgrade
     - role: bigip_wait
   tags: [upgrade, upgrade_active]
 
-- name: "BIG-IP HA Upgrade - Optional Failback"
+
+# =============================================================================
+# PLAY 6 - Optional: failback to original active unit
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 6: Optional Failback to Original Active"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:
-    - name: "Skip failback if not requested"
+    - name: "Skip failback - not requested (bigip_failback is false)"
       ansible.builtin.meta: end_host
-      when: not (bigip_failback | default(false) | bool)
+      when: not bigip_failback | default(false) | bool
 
-    - name: "Skip if this host is not the original standby (now active)"
+    - name: "Skip failback - this host is not the original standby (now active)"
       ansible.builtin.meta: end_host
-      when: ha_role != 'standby'
+      when: ha_role | default('unknown') != 'standby'
   tasks:
-    - name: "Fail back to original active unit"
-      f5networks.f5_bigip.bigip_command:
-        commands:
-          - "run /sys failover standby"
+    - name: "FAILBACK | Trigger failback to original active"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover"
+        method: POST
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          command: run
+          standby: true
+        status_code: [200, 202, -1]
+      delegate_to: localhost
       ignore_errors: true
+      no_log: true
 
-    - name: "Pause to allow failback to complete"
+    - name: "FAILBACK | Wait for failback to complete (30s)"
       ansible.builtin.pause:
         seconds: 30
   tags: [upgrade, failback]
 
-- name: "BIG-IP HA Upgrade - Post-Snapshot & Diff (Both Units)"
+
+# =============================================================================
+# PLAY 7 - Final post-snapshot: both units + diff report
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 7: Final Post-Snapshot & Diff Report (Both Units)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
-  vars:
-    snapshot_phase: post
   roles:
     - role: snapshot_post
     - role: snapshot_report

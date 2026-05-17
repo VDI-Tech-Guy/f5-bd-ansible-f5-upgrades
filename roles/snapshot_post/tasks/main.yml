@@ -1,3 +1,289 @@
 ---
-# Tasks implemented in subsequent build sessions.
-# See README.md for role documentation.
+# =============================================================================
+# snapshot_post - Collect post-upgrade state and diff against pre-snapshot
+# =============================================================================
+# Reads pre-snapshot from:
+#   {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
+# Writes post-snapshot to:
+#   {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json
+# Writes diff to:
+#   {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json
+# =============================================================================
+
+- name: "SNAPSHOT_POST | Verify pre-snapshot file exists"
+  ansible.builtin.stat:
+    path: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json"
+  register: pre_snap_stat
+  delegate_to: localhost
+  failed_when: not pre_snap_stat.stat.exists
+
+- name: "SNAPSHOT_POST | Load pre-snapshot data"
+  ansible.builtin.set_fact:
+    snapshot_pre_loaded: "{{ lookup('file', snapshot_output_dir + '/' + inventory_hostname + '_' + snapshot_timestamp + '_pre.json') | from_json }}"
+  delegate_to: localhost
+
+# -----------------------------------------------------------------------------
+# Collect post-upgrade state (same queries as snapshot_pre)
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Get virtual server status"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/ltm/virtual/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_post_vs
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_POST | Get pool member status"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/ltm/pool/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_post_pools
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_POST | Get route table"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/net/route"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_post_routes
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_POST | Get ARP table"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/net/arp/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_post_arp
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_POST | Get software version"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/version"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_post_version
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_POST | Get HA failover state"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_post_failover
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_POST | Get config sync state"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/cm/sync-status/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_post_sync
+  delegate_to: localhost
+  no_log: true
+
+# -----------------------------------------------------------------------------
+# Write post-snapshot JSON
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Write post-snapshot JSON file"
+  ansible.builtin.copy:
+    dest: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json"
+    content: "{{ snapshot_post_data | to_nice_json }}"
+    mode: '0644'
+  vars:
+    snapshot_post_data:
+      metadata:
+        hostname: "{{ inventory_hostname }}"
+        management_ip: "{{ ansible_host }}"
+        phase: post
+        timestamp: "{{ snapshot_timestamp }}"
+        version: >-
+          {{ snap_post_version.json.entries
+             ['https://localhost/mgmt/tm/sys/version/0']
+             .nestedStats.entries.Version.description
+             | default('unknown') }}
+        ha_failover_state: >-
+          {{ snap_post_failover.json.entries
+             ['https://localhost/mgmt/tm/sys/failover/0']
+             .nestedStats.entries.status.description
+             | default('unknown') }}
+        sync_state: >-
+          {{ snap_post_sync.json.entries
+             ['https://localhost/mgmt/tm/cm/sync-status/0']
+             .nestedStats.entries.status.description
+             | default('unknown') }}
+      virtual_servers: "{{ snap_post_vs.json.entries | default({}) }}"
+      pools: "{{ snap_post_pools.json.entries | default({}) }}"
+      routes: "{{ snap_post_routes.json.items | default([]) }}"
+      arp: "{{ snap_post_arp.json.entries | default({}) }}"
+  delegate_to: localhost
+
+# -----------------------------------------------------------------------------
+# Compute diffs
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Compute virtual server state changes"
+  ansible.builtin.set_fact:
+    diff_vs: >-
+      {%- set pre_entries = snapshot_pre_loaded.virtual_servers | default({}) -%}
+      {%- set post_entries = snap_post_vs.json.entries | default({}) -%}
+      {%- set results = [] -%}
+      {%- for key in post_entries -%}
+        {%- set post_avail = post_entries[key].nestedStats.entries.status.availabilityState.description | default('unknown') -%}
+        {%- set post_enabled = post_entries[key].nestedStats.entries.status.enabledState.description | default('unknown') -%}
+        {%- set pre_avail = pre_entries[key].nestedStats.entries.status.availabilityState.description | default('not_in_pre') if key in pre_entries else 'not_in_pre' -%}
+        {%- set pre_enabled = pre_entries[key].nestedStats.entries.status.enabledState.description | default('not_in_pre') if key in pre_entries else 'not_in_pre' -%}
+        {%- set vs_name = post_entries[key].nestedStats.entries['tmName'].description | default(key) -%}
+        {%- set changed = (pre_avail != post_avail) or (pre_enabled != post_enabled) -%}
+        {%- set regressed = (pre_avail == 'available' and post_avail != 'available') -%}
+        {%- if true -%}
+          {%- set _ = results.append({
+            'name': vs_name,
+            'pre_availability': pre_avail,
+            'post_availability': post_avail,
+            'pre_enabled': pre_enabled,
+            'post_enabled': post_enabled,
+            'changed': changed,
+            'regressed': regressed
+          }) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ results }}
+
+- name: "SNAPSHOT_POST | Compute route table changes"
+  ansible.builtin.set_fact:
+    diff_routes:
+      pre_count: "{{ snapshot_pre_loaded.routes | default([]) | length }}"
+      post_count: "{{ snap_post_routes.json.items | default([]) | length }}"
+      pre_names: "{{ snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list }}"
+      post_names: "{{ snap_post_routes.json.items | default([]) | map(attribute='name') | list }}"
+      added: "{{ (snap_post_routes.json.items | default([]) | map(attribute='name') | list)
+                 | difference(snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list) }}"
+      removed: "{{ (snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list)
+                   | difference(snap_post_routes.json.items | default([]) | map(attribute='name') | list) }}"
+
+- name: "SNAPSHOT_POST | Compute version change"
+  ansible.builtin.set_fact:
+    diff_version:
+      pre: "{{ snapshot_pre_loaded.metadata.version | default('unknown') }}"
+      post: >-
+        {{ snap_post_version.json.entries
+           ['https://localhost/mgmt/tm/sys/version/0']
+           .nestedStats.entries.Version.description
+           | default('unknown') }}
+      upgraded: >-
+        {{ snapshot_pre_loaded.metadata.version | default('') !=
+           snap_post_version.json.entries
+           ['https://localhost/mgmt/tm/sys/version/0']
+           .nestedStats.entries.Version.description | default('') }}
+
+- name: "SNAPSHOT_POST | Compute HA state change"
+  ansible.builtin.set_fact:
+    diff_ha:
+      pre_failover_state: "{{ snapshot_pre_loaded.metadata.ha_failover_state | default('unknown') }}"
+      post_failover_state: >-
+        {{ snap_post_failover.json.entries
+           ['https://localhost/mgmt/tm/sys/failover/0']
+           .nestedStats.entries.status.description
+           | default('unknown') }}
+      pre_sync_state: "{{ snapshot_pre_loaded.metadata.sync_state | default('unknown') }}"
+      post_sync_state: >-
+        {{ snap_post_sync.json.entries
+           ['https://localhost/mgmt/tm/cm/sync-status/0']
+           .nestedStats.entries.status.description
+           | default('unknown') }}
+
+- name: "SNAPSHOT_POST | Compute regression summary"
+  ansible.builtin.set_fact:
+    diff_regression_summary:
+      vs_regressions: "{{ diff_vs | selectattr('regressed', 'equalto', true) | list }}"
+      vs_regression_count: "{{ diff_vs | selectattr('regressed', 'equalto', true) | list | length }}"
+      routes_removed_count: "{{ diff_routes.removed | length }}"
+      sync_regressed: >-
+        {{ snapshot_pre_loaded.metadata.sync_state == 'In Sync'
+           and diff_ha.post_sync_state != 'In Sync' }}
+
+# -----------------------------------------------------------------------------
+# Write diff JSON file
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Write diff JSON file"
+  ansible.builtin.copy:
+    dest: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json"
+    content: "{{ diff_data | to_nice_json }}"
+    mode: '0644'
+  vars:
+    diff_data:
+      metadata:
+        hostname: "{{ inventory_hostname }}"
+        management_ip: "{{ ansible_host }}"
+        snapshot_timestamp: "{{ snapshot_timestamp }}"
+        pre_file: "{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json"
+        post_file: "{{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json"
+      version: "{{ diff_version }}"
+      ha: "{{ diff_ha }}"
+      virtual_servers: "{{ diff_vs }}"
+      routes: "{{ diff_routes }}"
+      regression_summary: "{{ diff_regression_summary }}"
+  delegate_to: localhost
+
+# -----------------------------------------------------------------------------
+# Fail play if regressions detected (configurable)
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Fail if VS regressions detected"
+  ansible.builtin.fail:
+    msg: >-
+      POST-UPGRADE REGRESSION DETECTED on {{ inventory_hostname }}:
+      {{ diff_regression_summary.vs_regression_count }} virtual server(s) that were
+      available before upgrade are no longer available.
+      See diff file: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json
+  when:
+    - snapshot_fail_on_regression | bool
+    - diff_regression_summary.vs_regression_count | int > 0
+
+- name: "SNAPSHOT_POST | Fail if sync state regressed"
+  ansible.builtin.fail:
+    msg: >-
+      POST-UPGRADE REGRESSION DETECTED on {{ inventory_hostname }}:
+      Config sync was 'In Sync' before upgrade but is now '{{ diff_ha.post_sync_state }}'.
+      Investigate before proceeding.
+  when:
+    - snapshot_fail_on_regression | bool
+    - diff_regression_summary.sync_regressed | bool

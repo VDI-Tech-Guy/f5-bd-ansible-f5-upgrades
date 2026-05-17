@@ -1,6 +1,7 @@
 ---
-snapshot_output_dir: "{{ playbook_dir }}/../../../snapshots"
+snapshot_output_dir: "/runner/artifacts/snapshots"
 # Fail the play if post-snapshot detects regressions
 snapshot_fail_on_regression: true
-# Percentage of pool members allowed to be down post-upgrade before failing
+# Percentage of pool members allowed to be down post-upgrade before failing (0 = none)
 snapshot_pool_member_down_threshold_pct: 0
+# NOTE: snapshot_timestamp is set in Play 0 and cached - not defined here

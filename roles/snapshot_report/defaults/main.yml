@@ -1,2 +1,3 @@
 ---
-snapshot_output_dir: "{{ playbook_dir }}/../../../snapshots"
+snapshot_output_dir: "/runner/artifacts/snapshots"
+# NOTE: snapshot_timestamp is set in Play 0 and cached - not defined here

@@ -1,2 +1,97 @@
 ---
-# Tasks implemented in subsequent build sessions.
+# =============================================================================
+# bigip_wait - Layered post-reboot readiness for BIG-IP
+# =============================================================================
+# All wait tasks run on the Ansible controller (delegate_to: localhost)
+# because the httpapi connection to the device is dead during reboot.
+# The controller polls the device's management IP directly over TCP/HTTPS.
+#
+# Layer sequence:
+#   1. Initial delay  - let the reboot actually start before probing
+#   2. SSH port down  - confirm reboot began (port 22 goes away)
+#   3. SSH port up    - kernel + sshd are running again
+#   4. HTTPS port up  - nginx/httpd stack is listening
+#   5. REST echo poll - /mgmt/shared/echo returns {"stage":"STARTED"}
+#                       only when REST framework is fully initialised
+#                       (works BIG-IP 13.1+ - no /mgmt/tm/sys/ready needed)
+#   6. mcpd check     - tmsh responds without error = config plane ready
+# =============================================================================
+
+- name: "WAIT | Initial delay - allow reboot to begin"
+  ansible.builtin.wait_for:
+    timeout: "{{ bigip_reboot_initial_delay }}"
+  delegate_to: localhost
+
+- name: "WAIT | Layer 1 - wait for SSH port to go DOWN (reboot started)"
+  ansible.builtin.wait_for:
+    host: "{{ bigip_wait_host }}"
+    port: "{{ bigip_ssh_port }}"
+    state: stopped
+    timeout: 300
+    sleep: 5
+  delegate_to: localhost
+  ignore_errors: true  # Some platforms close SSH before we get here - not fatal
+
+- name: "WAIT | Layer 2 - wait for SSH port to come UP (kernel running)"
+  ansible.builtin.wait_for:
+    host: "{{ bigip_wait_host }}"
+    port: "{{ bigip_ssh_port }}"
+    state: started
+    timeout: 600
+    sleep: 10
+  delegate_to: localhost
+
+- name: "WAIT | Layer 3 - wait for HTTPS port to come UP (web stack running)"
+  ansible.builtin.wait_for:
+    host: "{{ bigip_wait_host }}"
+    port: "{{ bigip_https_port }}"
+    state: started
+    timeout: 300
+    sleep: 10
+  delegate_to: localhost
+
+- name: "WAIT | Layer 4 - poll REST /mgmt/shared/echo until REST framework ready"
+  ansible.builtin.uri:
+    url: "https://{{ bigip_wait_host }}:{{ bigip_https_port }}/mgmt/shared/echo"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    return_content: true
+  register: bigip_rest_echo
+  until:
+    - bigip_rest_echo.status == 200
+    - bigip_rest_echo.json is defined
+    - bigip_rest_echo.json.stage is defined
+    - bigip_rest_echo.json.stage == "STARTED"
+  retries: "{{ bigip_wait_max_retries }}"
+  delay: "{{ bigip_wait_retry_delay }}"
+  delegate_to: localhost
+  no_log: true  # Suppress password from logs
+
+- name: "WAIT | Layer 5 - verify mcpd is ready via /mgmt/tm/sys/version"
+  ansible.builtin.uri:
+    url: "https://{{ bigip_wait_host }}:{{ bigip_https_port }}/mgmt/tm/sys/version"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: bigip_version_check
+  until: bigip_version_check.status == 200
+  retries: "{{ bigip_wait_max_retries }}"
+  delay: "{{ bigip_wait_retry_delay }}"
+  delegate_to: localhost
+  no_log: true
+
+- name: "WAIT | Display post-reboot version"
+  ansible.builtin.debug:
+    msg: >-
+      {{ bigip_wait_host }} is back online.
+      Version: {{ bigip_version_check.json.entries
+        ['https://localhost/mgmt/tm/sys/version/0']
+        .nestedStats.entries.Version.description
+        | default('unknown') }}

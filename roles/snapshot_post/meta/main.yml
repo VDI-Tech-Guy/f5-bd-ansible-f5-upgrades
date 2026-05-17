@@ -11,5 +11,7 @@ collections:
   - f5networks.f5_bigip
   - ansible.builtin
   - ansible.utils
-dependencies:
-  - snapshot_pre
+# NO dependency on snapshot_pre - if listed here Ansible would re-run
+# snapshot_pre at the start of every post-snapshot play, overwriting
+# the baseline data before the diff can be computed.
+dependencies: []

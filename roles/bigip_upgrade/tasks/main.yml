@@ -1,3 +1,150 @@
 ---
-# Tasks implemented in subsequent build sessions.
-# See README.md for role documentation.
+# =============================================================================
+# bigip_upgrade - Image upload, volume install, and reboot
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Pre-flight checks
+# -----------------------------------------------------------------------------
+
+- name: "UPGRADE | Verify image file exists on controller"
+  ansible.builtin.stat:
+    path: "{{ bigip_image_local_path }}/{{ bigip_image_filename }}"
+  register: bigip_image_stat
+  delegate_to: localhost
+  failed_when: not bigip_image_stat.stat.exists
+
+- name: "UPGRADE | Check current running version"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/version"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: bigip_current_version_check
+  delegate_to: localhost
+  no_log: true
+
+- name: "UPGRADE | Set current version fact"
+  ansible.builtin.set_fact:
+    bigip_current_version: >-
+      {{ bigip_current_version_check.json.entries
+         ['https://localhost/mgmt/tm/sys/version/0']
+         .nestedStats.entries.Version.description }}
+
+- name: "UPGRADE | Display current version"
+  ansible.builtin.debug:
+    msg: "{{ ansible_host }} current version: {{ bigip_current_version }} | target: {{ bigip_target_version }}"
+
+- name: "UPGRADE | Skip if target version already running"
+  ansible.builtin.meta: end_host
+  when: bigip_current_version is defined and bigip_target_version in bigip_current_version
+
+# -----------------------------------------------------------------------------
+# Check if image already exists on the device (avoid re-upload)
+# -----------------------------------------------------------------------------
+
+- name: "UPGRADE | Check if image already present on device"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/software/image"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: bigip_existing_images
+  delegate_to: localhost
+  no_log: true
+
+- name: "UPGRADE | Set image_already_present fact"
+  ansible.builtin.set_fact:
+    bigip_image_already_present: >-
+      {{ bigip_existing_images.json.items
+         | default([])
+         | selectattr('name', 'defined')
+         | selectattr('name', 'equalto', bigip_image_filename)
+         | list | length > 0 }}
+
+- name: "UPGRADE | Image already on device - skipping upload"
+  ansible.builtin.debug:
+    msg: "Image {{ bigip_image_filename }} already present on {{ ansible_host }} - skipping upload"
+  when: bigip_image_already_present | bool
+
+# -----------------------------------------------------------------------------
+# Upload image (chunked via iControl REST)
+# -----------------------------------------------------------------------------
+
+- name: "UPGRADE | Upload image to device"
+  f5networks.f5_bigip.bigip_software_image:
+    image: "{{ bigip_image_local_path }}/{{ bigip_image_filename }}"
+    state: present
+  when: not bigip_image_already_present | bool
+  register: bigip_image_upload
+
+- name: "UPGRADE | Wait for image to be ready post-upload"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/software/image/{{ bigip_image_filename }}"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: bigip_image_ready
+  until:
+    - bigip_image_ready.status == 200
+    - bigip_image_ready.json.status is defined
+    - bigip_image_ready.json.status == 'verified'
+  retries: 30
+  delay: 10
+  delegate_to: localhost
+  no_log: true
+  when: not bigip_image_already_present | bool
+
+# -----------------------------------------------------------------------------
+# Install to boot volume
+# -----------------------------------------------------------------------------
+
+- name: "UPGRADE | Install image to volume {{ bigip_install_volume }}"
+  f5networks.f5_bigip.bigip_software_install:
+    image: "{{ bigip_image_filename }}"
+    state: installed
+    volume: "{{ bigip_install_volume }}"
+  register: bigip_install_result
+  when: not bigip_upgrade_dry_run | bool
+
+- name: "UPGRADE | Dry-run mode - skipping install and reboot"
+  ansible.builtin.debug:
+    msg: >-
+      DRY RUN: Would install {{ bigip_image_filename }}
+      to volume {{ bigip_install_volume }} on {{ ansible_host }}
+  when: bigip_upgrade_dry_run | bool
+
+# -----------------------------------------------------------------------------
+# Activate (reboot into new volume)
+# The connection WILL drop here - this is expected and handled by block/rescue
+# -----------------------------------------------------------------------------
+
+- name: "UPGRADE | Activate new volume - reboot will drop connection"
+  block:
+    - name: "UPGRADE | Set boot volume and reboot"
+      f5networks.f5_bigip.bigip_software_install:
+        image: "{{ bigip_image_filename }}"
+        state: activated
+        volume: "{{ bigip_install_volume }}"
+      when: bigip_reboot_after_install | bool and not bigip_upgrade_dry_run | bool
+      ignore_errors: true  # Connection drops immediately on reboot - expected
+
+    - name: "UPGRADE | Reboot triggered - connection drop is expected"
+      ansible.builtin.debug:
+        msg: "Reboot initiated on {{ ansible_host }} - waiting for device to come back..."
+  rescue:
+    - name: "UPGRADE | Connection dropped during reboot - this is expected"
+      ansible.builtin.debug:
+        msg: >-
+          Connection to {{ ansible_host }} dropped (expected during reboot).
+          The bigip_wait role will now poll until the device is back online.
+  when: not bigip_upgrade_dry_run | bool

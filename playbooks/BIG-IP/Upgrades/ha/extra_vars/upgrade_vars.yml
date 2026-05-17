@@ -1,67 +1,90 @@
 ---
-# group_vars/bigip.yml
-# Variables shared across all BIG-IP devices.
-# Sensitive values (passwords, tokens) should be stored in Ansible Vault.
-# Override per-device in host_vars/<hostname>.yml as needed.
+# =============================================================================
+# BIG-IP HA Upgrade - AAP Extra Variables Template
+# =============================================================================
+# In AAP 2.6: Job Template > Extra Variables > paste this file contents,
+# then update the values for your specific upgrade.
+#
+# Connection variables (ansible_user, ansible_password, ansible_connection etc.)
+# belong in your AAP Credential and inventory group_vars - NOT here.
+# This file contains only upgrade-specific runtime parameters.
+# =============================================================================
 
 # -----------------------------------------------------------------------------
-# Connection
+# REQUIRED - Set these for every upgrade run
 # -----------------------------------------------------------------------------
-ansible_connection: httpapi
-ansible_network_os: f5networks.f5_bigip.bigip
-ansible_httpapi_port: 443
-ansible_httpapi_use_ssl: true
-ansible_httpapi_validate_certs: false
 
-# -----------------------------------------------------------------------------
-# Upgrade settings
-# -----------------------------------------------------------------------------
-# Path on Ansible controller where BIG-IP upgrade images are staged
-bigip_image_local_path: "/mnt/software/bigip"
+# Target BIG-IP software version (used for post-upgrade verification)
 bigip_target_version: "17.1.1"
+
+# ISO filename - must exist in bigip_image_local_path on the EE / controller
 bigip_image_filename: "BIGIP-17.1.1-0.0.4.iso"
 
-# Remote path on BIG-IP where image is uploaded (iControl REST uploads to /var/config/rest/downloads)
-bigip_image_remote_path: "/var/config/rest/downloads"
+# -----------------------------------------------------------------------------
+# Image paths
+# -----------------------------------------------------------------------------
 
-# Boot volume to install to (HD1.1 = primary, HD1.2 = secondary)
-# Set per-host in host_vars if devices differ
+# Path where upgrade ISOs are staged (on Ansible controller / EE)
+bigip_image_local_path: "/mnt/software/bigip"
+
+# -----------------------------------------------------------------------------
+# Install options
+# -----------------------------------------------------------------------------
+
+# Boot volume to install to
+# HD1.1 = primary (currently running) - do NOT install here
+# HD1.2 = secondary (install target)
 bigip_install_volume: "HD1.2"
 
-# Whether to reboot immediately after image install
+# Reboot into new volume immediately after install
 bigip_reboot_after_install: true
 
+# Set true to stage image and run all checks but skip actual reboot
 bigip_upgrade_dry_run: false
 
-# Set true to fail back to original active after upgrade completes
+# -----------------------------------------------------------------------------
+# HA options
+# -----------------------------------------------------------------------------
+
+# Set true to fail back to original active unit after both nodes are upgraded
 bigip_failback: false
 
 # -----------------------------------------------------------------------------
 # Wait / reboot timing
+# Increase these for slower environments or chassis-based hardware
 # -----------------------------------------------------------------------------
-# Seconds to wait after triggering reboot before starting port checks
+
+# Seconds to wait after reboot trigger before starting port probes
 bigip_reboot_initial_delay: 60
 
-# Seconds between REST readiness probe retries
+# Seconds between REST readiness probe retries (/mgmt/shared/echo)
 bigip_wait_retry_delay: 20
 
-# Maximum number of REST readiness probe attempts (~30 * 20s = 10 min)
+# Maximum REST probe retries (30 * 20s = 10 min max wait per device)
 bigip_wait_max_retries: 30
 
-# Port to probe for SSH liveness (used to confirm reboot started + completed)
+# Management port values (override if your devices use non-standard ports)
 bigip_ssh_port: 22
-
-# Port to probe for REST API liveness
 bigip_https_port: 443
 
 # -----------------------------------------------------------------------------
 # Snapshot settings
 # -----------------------------------------------------------------------------
-# Directory on Ansible controller where snapshot JSON files are saved
-snapshot_output_dir: "{{ playbook_dir }}/../../../snapshots"
 
-# Whether to save a UCS backup as part of the pre-snapshot
+# Directory on the controller / EE where snapshot JSON files are written.
+# In AAP 2.6 with EEs, use /runner/artifacts or a path on shared storage
+# if you need snapshots to persist beyond the job run.
+snapshot_output_dir: "/runner/artifacts/snapshots"
+
+# Save a UCS backup on the device as part of pre-snapshot
 bigip_snapshot_save_ucs: true
 
-# UCS backup directory on the BIG-IP
+# Directory on the BIG-IP where UCS files are stored
 bigip_ucs_path: "/var/local/ucs"
+
+# Fail the post-snapshot play if regressions are detected
+# Set false to generate the report but not halt the playbook
+snapshot_fail_on_regression: true
+
+# Allowed percentage of pool members that can be down post-upgrade (0 = none)
+snapshot_pool_member_down_threshold_pct: 0

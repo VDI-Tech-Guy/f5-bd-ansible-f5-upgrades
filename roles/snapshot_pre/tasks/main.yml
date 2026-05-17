@@ -1,3 +1,222 @@
 ---
-# Tasks implemented in subsequent build sessions.
-# See README.md for role documentation.
+# =============================================================================
+# snapshot_pre - Collect baseline state before upgrade
+# =============================================================================
+# Captures: virtual server status, pool member health, route table,
+#           ARP table, running config hash, UCS backup, software version,
+#           HA sync state
+# Output: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
+# =============================================================================
+
+- name: "SNAPSHOT_PRE | Ensure snapshot output directory exists on controller"
+  ansible.builtin.file:
+    path: "{{ snapshot_output_dir }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  run_once: false
+
+# -----------------------------------------------------------------------------
+# Collect data via iControl REST - all delegated to localhost
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Get virtual server status"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/ltm/virtual/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_virtual_servers
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_PRE | Get pool member status"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/ltm/pool/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_pools
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_PRE | Get route table"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/net/route"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_routes
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_PRE | Get ARP table"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/net/arp/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_arp
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_PRE | Get software version"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/version"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_version
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_PRE | Get HA failover state"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_failover
+  delegate_to: localhost
+  no_log: true
+
+- name: "SNAPSHOT_PRE | Get config sync state"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/cm/sync-status/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+  register: snap_sync
+  delegate_to: localhost
+  no_log: true
+
+# -----------------------------------------------------------------------------
+# Save UCS backup on device
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Save UCS backup on device"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/ucs"
+    method: POST
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    body:
+      command: save
+      name: "pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}"
+    status_code: [200, 202]
+  register: snap_ucs_save
+  delegate_to: localhost
+  no_log: true
+  when: bigip_snapshot_save_ucs | bool
+
+# -----------------------------------------------------------------------------
+# Build normalised virtual server summary
+# (extract just name + availability + enabled state from the stats blob)
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Build virtual server summary"
+  ansible.builtin.set_fact:
+    snap_vs_summary: >-
+      {{ snap_virtual_servers.json.entries
+         | default({})
+         | dict2items
+         | map(attribute='value')
+         | map(attribute='nestedStats')
+         | map(attribute='entries')
+         | map('dict2items')
+         | map('items2dict', key_name='key', value_name='value')
+         | list }}
+
+- name: "SNAPSHOT_PRE | Build pool member summary"
+  ansible.builtin.set_fact:
+    snap_pool_summary: >-
+      {{ snap_pools.json.entries
+         | default({})
+         | dict2items
+         | map(attribute='value')
+         | map(attribute='nestedStats')
+         | map(attribute='entries')
+         | list }}
+
+# -----------------------------------------------------------------------------
+# Write pre-snapshot JSON to controller
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Write pre-snapshot JSON file"
+  ansible.builtin.copy:
+    dest: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json"
+    content: "{{ snapshot_pre_data | to_nice_json }}"
+    mode: '0644'
+  vars:
+    snapshot_pre_data:
+      metadata:
+        hostname: "{{ inventory_hostname }}"
+        management_ip: "{{ ansible_host }}"
+        phase: pre
+        timestamp: "{{ snapshot_timestamp }}"
+        version: >-
+          {{ snap_version.json.entries
+             ['https://localhost/mgmt/tm/sys/version/0']
+             .nestedStats.entries.Version.description
+             | default('unknown') }}
+        ha_failover_state: >-
+          {{ snap_failover.json.entries
+             ['https://localhost/mgmt/tm/sys/failover/0']
+             .nestedStats.entries.status.description
+             | default('unknown') }}
+        sync_state: >-
+          {{ snap_sync.json.entries
+             ['https://localhost/mgmt/tm/cm/sync-status/0']
+             .nestedStats.entries.status.description
+             | default('unknown') }}
+        ucs_saved: "{{ bigip_snapshot_save_ucs | bool }}"
+        ucs_name: >-
+          {{ 'pre_upgrade_' + inventory_hostname + '_' + snapshot_timestamp
+             if bigip_snapshot_save_ucs | bool else 'not_saved' }}
+      virtual_servers: "{{ snap_virtual_servers.json.entries | default({}) }}"
+      pools: "{{ snap_pools.json.entries | default({}) }}"
+      routes: "{{ snap_routes.json.items | default([]) }}"
+      arp: "{{ snap_arp.json.entries | default({}) }}"
+  delegate_to: localhost
+
+- name: "SNAPSHOT_PRE | Summary"
+  ansible.builtin.debug:
+    msg: >-
+      Pre-snapshot complete for {{ inventory_hostname }}.
+      Version: {{ snap_version.json.entries
+                  ['https://localhost/mgmt/tm/sys/version/0']
+                  .nestedStats.entries.Version.description
+                  | default('unknown') }} |
+      HA state: {{ snap_failover.json.entries
+                   ['https://localhost/mgmt/tm/sys/failover/0']
+                   .nestedStats.entries.status.description
+                   | default('unknown') }} |
+      Sync: {{ snap_sync.json.entries
+               ['https://localhost/mgmt/tm/cm/sync-status/0']
+               .nestedStats.entries.status.description
+               | default('unknown') }} |
+      File: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json

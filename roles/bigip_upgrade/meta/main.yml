@@ -10,5 +10,6 @@ collections:
   - f5networks.f5_bigip
   - f5networks.f5_modules
   - ansible.builtin
-dependencies:
-  - bigip_wait
+# NO dependency on bigip_wait here - bigip_wait must run AFTER the reboot
+# trigger, not before. Sequence is managed explicitly in the playbook.
+dependencies: []
