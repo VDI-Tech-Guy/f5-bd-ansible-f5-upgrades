@@ -29,8 +29,6 @@
 - name: "BIG-IP HA Upgrade - Pre-Snapshot (Both Units)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
   vars:
     snapshot_phase: pre
     snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
@@ -41,8 +39,6 @@
 - name: "BIG-IP HA Upgrade - Upgrade Standby Unit"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
   vars:
     # Only target the standby unit in this play
     ansible_limit_ha_role: standby
@@ -58,8 +54,6 @@
 - name: "BIG-IP HA Upgrade - Force Failover to Standby"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
   pre_tasks:
     - name: "Skip if this host is not the active unit"
       ansible.builtin.meta: end_host
@@ -81,8 +75,6 @@
 - name: "BIG-IP HA Upgrade - Upgrade Old-Active (Now Standby)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
   pre_tasks:
     - name: "Skip if this host is not the original active"
       ansible.builtin.meta: end_host
@@ -95,8 +87,6 @@
 - name: "BIG-IP HA Upgrade - Optional Failback"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
   pre_tasks:
     - name: "Skip failback if not requested"
       ansible.builtin.meta: end_host
@@ -120,8 +110,6 @@
 - name: "BIG-IP HA Upgrade - Post-Snapshot & Diff (Both Units)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
   vars:
     snapshot_phase: post
   roles:
