@@ -17,6 +17,7 @@ ansible_network_os: f5networks.f5_bigip.bigip
 ansible_httpapi_port: 443
 ansible_httpapi_use_ssl: true
 ansible_httpapi_validate_certs: false
+
 # Persistent connection command timeout - bigip_device_info on large configs
 # can take several minutes, default 30s is too short
 ansible_command_timeout: 600

@@ -19,6 +19,13 @@
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
+# Reset persistent connection before module calls
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Reset persistent connection to BIG-IP"
+  ansible.builtin.meta: reset_connection
+
+# -----------------------------------------------------------------------------
 # Module call - VS, pools, sync-status, system-info
 # -----------------------------------------------------------------------------
 

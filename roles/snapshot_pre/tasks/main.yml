@@ -17,6 +17,14 @@
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
+# Reset persistent connection before module calls
+# After reboot the httpapi socket may be stale - reset forces a fresh connect
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Reset persistent connection to BIG-IP"
+  ansible.builtin.meta: reset_connection
+
+# -----------------------------------------------------------------------------
 # Module call - VS, pools, sync-status, system-info
 # -----------------------------------------------------------------------------
 

@@ -158,6 +158,21 @@
         - bigip_already_upgraded | bool
         - not bigip_upgrade_dry_run | default(false) | bool
 
+    - name: "PREFLIGHT | Split-brain detected - this node not yet upgraded, allow to proceed"
+      ansible.builtin.debug:
+        msg: >-
+          SPLIT-BRAIN RESUME: {{ inventory_hostname }} is on {{ bigip_current_version }}
+          and disconnected due to version mismatch with the already-upgraded peer.
+          Proceeding with upgrade on this node.
+      when:
+        - bigip_sync_state != 'In Sync'
+        - not bigip_already_upgraded | bool
+        - hostvars | dict2items
+          | selectattr('value.bigip_already_upgraded', 'defined')
+          | selectattr('value.bigip_already_upgraded', 'equalto', true)
+          | list | length > 0
+        - not bigip_upgrade_dry_run | default(false) | bool
+
     - name: "PREFLIGHT | Abort if out of sync for non-split-brain reason"
       ansible.builtin.fail:
         msg: >-
@@ -168,6 +183,10 @@
       when:
         - bigip_sync_state != 'In Sync'
         - not bigip_already_upgraded | bool
+        - not (hostvars | dict2items
+          | selectattr('value.bigip_already_upgraded', 'defined')
+          | selectattr('value.bigip_already_upgraded', 'equalto', true)
+          | list | length > 0)
         - not bigip_upgrade_dry_run | default(false) | bool
 
     - name: "PREFLIGHT | Cache snapshot_timestamp and backup_date across all plays"

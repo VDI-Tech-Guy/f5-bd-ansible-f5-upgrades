@@ -25,8 +25,15 @@
 # =============================================================================
 
 # =============================================================================
-# REQUIRED - Must be set for every upgrade run
+# CONNECTION TIMEOUTS
+# ansible_command_timeout controls how long the persistent httpapi connection
+# waits for module responses. Default is 30s which is too short for
+# bigip_device_info which makes internal AS3/package checks on init.
+# Set here in extra_vars to ensure AAP picks it up (highest precedence).
 # =============================================================================
+ansible_command_timeout: 600
+
+
 
 # Target BIG-IP software version (used for post-upgrade version verification)
 bigip_target_version: "17.1.1"
