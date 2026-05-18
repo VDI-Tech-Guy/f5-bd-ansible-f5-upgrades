@@ -1,15 +1,12 @@
 ---
 # =============================================================================
-# bigip_upgrade - Image upload, volume install, and reboot
+# bigip_upgrade - Image install and reboot
 # =============================================================================
+# Image is already on BIG-IP /shared/images/ verified by bastion_image_push.
 
 # -----------------------------------------------------------------------------
-# Pre-flight checks
+# Pre-flight - version check
 # -----------------------------------------------------------------------------
-
-# Image staging (CIFS -> bastion -> BIG-IP /shared/images/) is handled by
-# the bastion_image_push role which runs BEFORE this role in the playbook.
-# By the time we get here the image is already on the BIG-IP and verified.
 
 - name: "UPGRADE | Check current running version"
   ansible.builtin.uri:
@@ -20,9 +17,19 @@
     force_basic_auth: true
     validate_certs: false
     status_code: 200
+    timeout: 60
   register: bigip_current_version_check
   delegate_to: localhost
+  retries: 10
+  delay: 15
+  until: bigip_current_version_check.status == 200
   # TROUBLESHOOTING: no_log: true
+
+- name: "UPGRADE | Fail if version check did not succeed"
+  ansible.builtin.fail:
+    msg: >-
+      Could not reach {{ ansible_host }} after 10 retries. Halting upgrade.
+  when: bigip_current_version_check.status != 200
 
 - name: "UPGRADE | Set current version fact"
   ansible.builtin.set_fact:
@@ -42,9 +49,6 @@
   ansible.builtin.meta: end_host
   when: bigip_current_version is defined and bigip_target_version in bigip_current_version
 
-# Image is already on BIG-IP /shared/images/ and verified by bastion_image_push.
-# Confirm image is visible to the software subsystem before proceeding to install.
-
 # -----------------------------------------------------------------------------
 # Install to boot volume
 # -----------------------------------------------------------------------------
@@ -59,14 +63,26 @@
 
 - name: "UPGRADE | Dry-run mode - skipping install and reboot"
   ansible.builtin.debug:
-    msg: >-
-      DRY RUN: Would install {{ bigip_image_filename }}
-      to volume {{ bigip_install_volume }} on {{ ansible_host }}
+    msg: "DRY RUN: Would install {{ bigip_image_filename }} to {{ bigip_install_volume }} on {{ ansible_host }}"
   when: bigip_upgrade_dry_run | bool
 
 # -----------------------------------------------------------------------------
+# Brief pause between install complete and activation
+# bigip_software_install state=installed blocks until install completes but
+# BIG-IP still needs a moment to finish post-install archive verification
+# before activation can proceed without a 400 error.
+# -----------------------------------------------------------------------------
+
+- name: "UPGRADE | Pause 60s for post-install archive verification to complete"
+  ansible.builtin.pause:
+    seconds: 60
+  when: not bigip_upgrade_dry_run | bool
+
+# -----------------------------------------------------------------------------
 # Activate (reboot into new volume)
-# The connection WILL drop here - this is expected and handled by block/rescue
+# Connection WILL drop on activation - this is expected.
+# ignore_errors only covers the connection drop, not API errors.
+# The block/rescue pattern catches the connection drop cleanly.
 # -----------------------------------------------------------------------------
 
 - name: "UPGRADE | Activate new volume - reboot will drop connection"
@@ -77,7 +93,6 @@
         state: activated
         volume: "{{ bigip_install_volume }}"
       when: bigip_reboot_after_install | bool and not bigip_upgrade_dry_run | bool
-      ignore_errors: true  # Connection drops immediately on reboot - expected
 
     - name: "UPGRADE | Reboot triggered - connection drop is expected"
       ansible.builtin.debug:
