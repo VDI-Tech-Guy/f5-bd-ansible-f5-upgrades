@@ -2,14 +2,8 @@
 # =============================================================================
 # snapshot_post - Collect post-upgrade state and diff against pre-snapshot
 # =============================================================================
-# Uses f5networks.f5_bigip.bigip_device_info module for all LTM/system data.
-#
-# Reads pre-snapshot from:
-#   {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
-# Writes post-snapshot to:
-#   {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json
-# Writes diff to:
-#   {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json
+# Uses f5networks.f5_bigip.bigip_device_info for VS, pools, sync-status,
+# system-info. Routes and ARP use bigip_command. HA failover uses uri.
 # =============================================================================
 
 - name: "SNAPSHOT_POST | Verify pre-snapshot file exists"
@@ -25,7 +19,7 @@
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
-# Collect post-upgrade state via module
+# Module call - VS, pools, sync-status, system-info
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_POST | Collect device info via bigip_device_info module"
@@ -33,10 +27,29 @@
     gather_subset:
       - virtual-servers
       - ltm-pools
-      - routes
-      - arp
+      - sync-status
       - system-info
   register: snap_post_device_info
+
+# -----------------------------------------------------------------------------
+# Routes and ARP via bigip_command
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Get route table via tmsh"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh show /net route all-properties"
+  register: snap_post_routes
+
+- name: "SNAPSHOT_POST | Get ARP table via tmsh"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh show /net arp all"
+  register: snap_post_arp
+
+# -----------------------------------------------------------------------------
+# HA failover state via uri
+# -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_POST | Get HA failover state"
   ansible.builtin.uri:
@@ -55,23 +68,6 @@
   until: snap_post_failover.status == 200
   # TROUBLESHOOTING: no_log: true
 
-- name: "SNAPSHOT_POST | Get config sync state"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/cm/sync-status/stats"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-    timeout: 60
-  register: snap_post_sync
-  delegate_to: localhost
-  retries: 5
-  delay: 15
-  until: snap_post_sync.status == 200
-  # TROUBLESHOOTING: no_log: true
-
 # -----------------------------------------------------------------------------
 # Normalise HA state values
 # -----------------------------------------------------------------------------
@@ -83,15 +79,11 @@
          .get('apiAnonymous', '') | lower is search('active')
          else 'standby' }}
 
-- name: "SNAPSHOT_POST | Normalise - config sync state"
+- name: "SNAPSHOT_POST | Normalise - config sync state from module"
   ansible.builtin.set_fact:
     snap_post_sync_state: >-
-      {{ snap_post_sync.json.get('entries', {})
-         .get('https://localhost/mgmt/tm/cm/sync-status/0/stats', {})
-         .get('nestedStats', {})
-         .get('entries', {})
-         .get('status', {})
-         .get('description', 'unknown') }}
+      {{ snap_post_device_info.sync_status | default([]) | first
+         | default({}) | json_query('status') | default('unknown') }}
 
 # -----------------------------------------------------------------------------
 # Write post-snapshot JSON
@@ -114,8 +106,8 @@
         sync_state: "{{ snap_post_sync_state }}"
       virtual_servers: "{{ snap_post_device_info.virtual_servers | default([]) }}"
       ltm_pools: "{{ snap_post_device_info.ltm_pools | default([]) }}"
-      routes: "{{ snap_post_device_info.routes | default([]) }}"
-      arp: "{{ snap_post_device_info.arp | default([]) }}"
+      routes: "{{ snap_post_routes.stdout_lines | default([]) }}"
+      arp: "{{ snap_post_arp.stdout_lines | default([]) }}"
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
@@ -149,15 +141,12 @@
       {%- endfor -%}
       {{ results }}
 
-- name: "SNAPSHOT_POST | Compute route table changes"
+- name: "SNAPSHOT_POST | Compute route changes (line count comparison)"
   ansible.builtin.set_fact:
     diff_routes:
-      pre_count: "{{ snapshot_pre_loaded.routes | default([]) | length }}"
-      post_count: "{{ snap_post_device_info.routes | default([]) | length }}"
-      added: "{{ (snap_post_device_info.routes | default([]) | map(attribute='name') | list)
-                 | difference(snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list) }}"
-      removed: "{{ (snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list)
-                   | difference(snap_post_device_info.routes | default([]) | map(attribute='name') | list) }}"
+      pre_line_count: "{{ snapshot_pre_loaded.routes | default([]) | length }}"
+      post_line_count: "{{ snap_post_routes.stdout_lines | default([]) | length }}"
+      changed: "{{ snapshot_pre_loaded.routes | default([]) | length != snap_post_routes.stdout_lines | default([]) | length }}"
 
 - name: "SNAPSHOT_POST | Compute version change"
   ansible.builtin.set_fact:
@@ -179,7 +168,7 @@
     diff_regression_summary:
       vs_regressions: "{{ diff_vs | selectattr('regressed', 'equalto', true) | list }}"
       vs_regression_count: "{{ diff_vs | selectattr('regressed', 'equalto', true) | list | length }}"
-      routes_removed_count: "{{ diff_routes.removed | length }}"
+      routes_changed: "{{ diff_routes.changed }}"
       sync_regressed: >-
         {{ snapshot_pre_loaded.metadata.sync_state == 'In Sync'
            and snap_post_sync_state != 'In Sync' }}

@@ -2,11 +2,10 @@
 # =============================================================================
 # snapshot_pre - Collect baseline state before upgrade
 # =============================================================================
-# Uses f5networks.f5_bigip.bigip_device_info module which handles connection,
-# retries and timeouts internally. Single module call collects all data.
+# Uses f5networks.f5_bigip.bigip_device_info for VS, pools, sync-status,
+# system-info. Routes and ARP use bigip_command (no module subset available).
+# HA failover state uses uri (no module subset available).
 #
-# Captures: virtual server status, pool member health, routes, ARP,
-#           system version, HA failover state, sync state, UCS backup
 # Output: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
 # =============================================================================
 
@@ -18,8 +17,7 @@
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
-# Single module call collects all LTM/system data
-# Module handles connection management, retries, and timeout internally
+# Module call - VS, pools, sync-status, system-info
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_PRE | Collect device info via bigip_device_info module"
@@ -27,13 +25,28 @@
     gather_subset:
       - virtual-servers
       - ltm-pools
-      - routes
-      - arp
+      - sync-status
       - system-info
   register: snap_device_info
 
 # -----------------------------------------------------------------------------
-# Collect HA state separately - not in bigip_device_info subset
+# Routes and ARP via bigip_command (no gather_subset available)
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Get route table via tmsh"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh show /net route all-properties"
+  register: snap_routes
+
+- name: "SNAPSHOT_PRE | Get ARP table via tmsh"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh show /net arp all"
+  register: snap_arp
+
+# -----------------------------------------------------------------------------
+# HA failover state via uri (no module subset available)
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_PRE | Get HA failover state"
@@ -53,23 +66,6 @@
   until: snap_failover.status == 200
   # TROUBLESHOOTING: no_log: true
 
-- name: "SNAPSHOT_PRE | Get config sync state"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/cm/sync-status/stats"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-    timeout: 60
-  register: snap_sync
-  delegate_to: localhost
-  retries: 5
-  delay: 15
-  until: snap_sync.status == 200
-  # TROUBLESHOOTING: no_log: true
-
 # -----------------------------------------------------------------------------
 # Normalise HA state values
 # -----------------------------------------------------------------------------
@@ -81,15 +77,11 @@
          .get('apiAnonymous', '') | lower is search('active')
          else 'standby' }}
 
-- name: "SNAPSHOT_PRE | Normalise - config sync state"
+- name: "SNAPSHOT_PRE | Normalise - config sync state from module"
   ansible.builtin.set_fact:
     snap_sync_state: >-
-      {{ snap_sync.json.get('entries', {})
-         .get('https://localhost/mgmt/tm/cm/sync-status/0/stats', {})
-         .get('nestedStats', {})
-         .get('entries', {})
-         .get('status', {})
-         .get('description', 'unknown') }}
+      {{ snap_device_info.sync_status | default([]) | first
+         | default({}) | json_query('status') | default('unknown') }}
 
 # -----------------------------------------------------------------------------
 # Save UCS backup
@@ -129,8 +121,8 @@
              if bigip_snapshot_save_ucs | bool else 'not_saved' }}
       virtual_servers: "{{ snap_device_info.virtual_servers | default([]) }}"
       ltm_pools: "{{ snap_device_info.ltm_pools | default([]) }}"
-      routes: "{{ snap_device_info.routes | default([]) }}"
-      arp: "{{ snap_device_info.arp | default([]) }}"
+      routes: "{{ snap_routes.stdout_lines | default([]) }}"
+      arp: "{{ snap_arp.stdout_lines | default([]) }}"
   delegate_to: localhost
 
 - name: "SNAPSHOT_PRE | Summary"

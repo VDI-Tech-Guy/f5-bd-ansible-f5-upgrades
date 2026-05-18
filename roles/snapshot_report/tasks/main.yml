@@ -54,10 +54,9 @@
   ansible.builtin.debug:
     msg: >-
       ROUTES:
-        Before : {{ report_diff.routes.pre_count }} routes
-        After  : {{ report_diff.routes.post_count }} routes
-        Added  : {{ report_diff.routes.added | length }} ({{ report_diff.routes.added | join(', ') if report_diff.routes.added | length > 0 else 'none' }})
-        Removed: {{ report_diff.routes.removed | length }} ({{ report_diff.routes.removed | join(', ') if report_diff.routes.removed | length > 0 else 'none' }})
+        Before : {{ report_diff.routes.pre_line_count }} lines
+        After  : {{ report_diff.routes.post_line_count }} lines
+        Changed: {{ report_diff.routes.changed }}
 
 - name: "REPORT | Changed Virtual Servers (state changed but not necessarily regressed)"
   ansible.builtin.debug:
