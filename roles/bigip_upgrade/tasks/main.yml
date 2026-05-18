@@ -94,12 +94,32 @@
     - not bigip_upgrade_dry_run | bool
     - bigip_reboot_after_install | bool
 
-- name: "UPGRADE | Wait 30s for BIG-IP to stabilise before polling"
+- name: "UPGRADE | Wait 90s for BIG-IP install process to begin"
   ansible.builtin.pause:
-    seconds: 30
+    seconds: 90
   when:
     - not bigip_upgrade_dry_run | bool
     - bigip_reboot_after_install | bool
+
+- name: "UPGRADE | Re-establish httpapi connection before polling"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/shared/echo"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    timeout: 30
+  register: bigip_reconnect
+  delegate_to: localhost
+  retries: 10
+  delay: 30
+  until: bigip_reconnect.status == 200
+  when:
+    - not bigip_upgrade_dry_run | bool
+    - bigip_reboot_after_install | bool
+  # TROUBLESHOOTING: no_log: true
 
 # -----------------------------------------------------------------------------
 # Call 2 - Poll via volume_uri until complete or device restarts services
