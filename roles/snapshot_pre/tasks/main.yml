@@ -37,7 +37,7 @@
     status_code: 200
   register: snap_virtual_servers
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_PRE | Get pool member status"
   ansible.builtin.uri:
@@ -50,7 +50,7 @@
     status_code: 200
   register: snap_pools
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_PRE | Get route table"
   ansible.builtin.uri:
@@ -63,7 +63,7 @@
     status_code: 200
   register: snap_routes
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_PRE | Get ARP table"
   ansible.builtin.uri:
@@ -76,7 +76,7 @@
     status_code: 200
   register: snap_arp
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_PRE | Get software version"
   ansible.builtin.uri:
@@ -89,7 +89,7 @@
     status_code: 200
   register: snap_version
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_PRE | Get HA failover state"
   ansible.builtin.uri:
@@ -102,7 +102,7 @@
     status_code: 200
   register: snap_failover
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_PRE | Get config sync state"
   ansible.builtin.uri:
@@ -115,7 +115,7 @@
     status_code: 200
   register: snap_sync
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 # -----------------------------------------------------------------------------
 # Normalise response values
@@ -144,17 +144,15 @@
          else 'standby' }}
 
 - name: "SNAPSHOT_PRE | Normalise - config sync state"
+  # Key confirmed: https://localhost/mgmt/tm/cm/sync-status/0/stats
   ansible.builtin.set_fact:
     snap_sync_state: >-
-      {%- set ns_state = snap_sync.json.get('entries', {})
-           .get('https://localhost/mgmt/tm/cm/sync-status/0', {})
-           .get('nestedStats', {})
-           .get('entries', {})
-           .get('status', {})
-           .get('description', '') -%}
-      {%- set raw_state = snap_sync.json.get('apiRawValues', {})
-           .get('apiAnonymous', '') -%}
-      {{ ns_state if ns_state | length > 0 else raw_state | trim | default('unknown') }}
+      {{ snap_sync.json.get('entries', {})
+         .get('https://localhost/mgmt/tm/cm/sync-status/0/stats', {})
+         .get('nestedStats', {})
+         .get('entries', {})
+         .get('status', {})
+         .get('description', 'unknown') }}
 
 # -----------------------------------------------------------------------------
 # Save UCS backup on device (stored locally on BIG-IP for later fetch)
@@ -175,7 +173,7 @@
     status_code: [200, 202]
   register: snap_ucs_save
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
   when: bigip_snapshot_save_ucs | bool
 
 # -----------------------------------------------------------------------------

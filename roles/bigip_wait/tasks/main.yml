@@ -69,7 +69,7 @@
   retries: "{{ bigip_wait_max_retries }}"
   delay: "{{ bigip_wait_retry_delay }}"
   delegate_to: localhost
-  no_log: true  # Suppress password from logs
+  # TROUBLESHOOTING: no_log: true  # Suppress password from logs
 
 - name: "WAIT | Layer 5 - verify mcpd is ready via /mgmt/tm/sys/version"
   ansible.builtin.uri:
@@ -85,7 +85,7 @@
   retries: "{{ bigip_wait_max_retries }}"
   delay: "{{ bigip_wait_retry_delay }}"
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "WAIT | Display post-reboot version"
   ansible.builtin.debug:

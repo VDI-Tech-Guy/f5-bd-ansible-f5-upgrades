@@ -37,7 +37,7 @@
     status_code: 200
   register: snap_post_vs
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_POST | Get pool member status"
   ansible.builtin.uri:
@@ -50,7 +50,7 @@
     status_code: 200
   register: snap_post_pools
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_POST | Get route table"
   ansible.builtin.uri:
@@ -63,7 +63,7 @@
     status_code: 200
   register: snap_post_routes
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_POST | Get ARP table"
   ansible.builtin.uri:
@@ -76,7 +76,7 @@
     status_code: 200
   register: snap_post_arp
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_POST | Get software version"
   ansible.builtin.uri:
@@ -89,7 +89,7 @@
     status_code: 200
   register: snap_post_version
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_POST | Get HA failover state"
   ansible.builtin.uri:
@@ -102,7 +102,7 @@
     status_code: 200
   register: snap_post_failover
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_POST | Get config sync state"
   ansible.builtin.uri:
@@ -115,7 +115,7 @@
     status_code: 200
   register: snap_post_sync
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 # -----------------------------------------------------------------------------
 # Normalise response values - same pattern as snapshot_pre
@@ -139,17 +139,15 @@
          else 'standby' }}
 
 - name: "SNAPSHOT_POST | Normalise - config sync state"
+  # Key confirmed: https://localhost/mgmt/tm/cm/sync-status/0/stats
   ansible.builtin.set_fact:
     snap_post_sync_state: >-
-      {%- set ns_state = snap_post_sync.json.get('entries', {})
-           .get('https://localhost/mgmt/tm/cm/sync-status/0', {})
-           .get('nestedStats', {})
-           .get('entries', {})
-           .get('status', {})
-           .get('description', '') -%}
-      {%- set raw_state = snap_post_sync.json.get('apiRawValues', {})
-           .get('apiAnonymous', '') -%}
-      {{ ns_state if ns_state | length > 0 else raw_state | trim | default('unknown') }}
+      {{ snap_post_sync.json.get('entries', {})
+         .get('https://localhost/mgmt/tm/cm/sync-status/0/stats', {})
+         .get('nestedStats', {})
+         .get('entries', {})
+         .get('status', {})
+         .get('description', 'unknown') }}
 
 # -----------------------------------------------------------------------------
 # Write post-snapshot JSON

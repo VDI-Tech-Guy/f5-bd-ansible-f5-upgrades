@@ -22,7 +22,7 @@
     status_code: 200
   register: bigip_current_version_check
   delegate_to: localhost
-  no_log: true
+  # TROUBLESHOOTING: no_log: true
 
 - name: "UPGRADE | Set current version fact"
   ansible.builtin.set_fact:

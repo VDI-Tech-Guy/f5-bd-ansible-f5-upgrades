@@ -93,19 +93,16 @@
       # TROUBLESHOOTING: no_log: true
 
     - name: "PREFLIGHT | Set sync state fact"
-      # sync-status/stats uses nestedStats on most versions.
-      # Fall back to apiRawValues.apiAnonymous if nestedStats is absent.
+      # sync-status/stats uses nestedStats.entries.status.description
+      # Key confirmed: https://localhost/mgmt/tm/cm/sync-status/0/stats
       ansible.builtin.set_fact:
         bigip_sync_state: >-
-          {%- set ns_state = preflight_sync_query.json.get('entries', {})
-               .get('https://localhost/mgmt/tm/cm/sync-status/0', {})
-               .get('nestedStats', {})
-               .get('entries', {})
-               .get('status', {})
-               .get('description', '') -%}
-          {%- set raw_state = preflight_sync_query.json.get('apiRawValues', {})
-               .get('apiAnonymous', '') -%}
-          {{ ns_state if ns_state | length > 0 else raw_state | trim | default('unknown') }}
+          {{ preflight_sync_query.json.get('entries', {})
+             .get('https://localhost/mgmt/tm/cm/sync-status/0/stats', {})
+             .get('nestedStats', {})
+             .get('entries', {})
+             .get('status', {})
+             .get('description', 'unknown') }}
         cacheable: true
 
     - name: "PREFLIGHT | Abort if pair is not In Sync"
