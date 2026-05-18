@@ -1,6 +1,17 @@
 # f5-bd-ansible-f5-upgrades
 
-Automated upgrade orchestration for F5OS (rSeries / Velos) and BIG-IP devices (standalone and HA pairs), with pre/post snapshot collection and JSON diff reporting.
+Automated upgrade orchestration for F5 BIG-IP devices (standalone and HA pairs) and F5OS platforms (rSeries / Velos), with pre/post snapshot collection, JSON diff reporting, and bastion-based artifact storage.
+
+---
+
+## Status
+
+| Platform | Status |
+|---|---|
+| BIG-IP HA Pair | ✅ Testing ready |
+| BIG-IP Standalone | 🚧 Testing In Progress |
+| F5OS rSeries | 🚧 Work in progress |
+| F5OS Velos | 🚧 Work in progress |
 
 ---
 
@@ -8,45 +19,42 @@ Automated upgrade orchestration for F5OS (rSeries / Velos) and BIG-IP devices (s
 
 ```
 f5-bd-ansible-f5-upgrades/
-├── ansible.cfg                         # Ansible configuration
-├── galaxy.yml                          # Collection metadata
+├── ansible.cfg
 ├── collections/
-│   └── requirements.yml                # Collection dependencies
+│   └── requirements.yml
 ├── inventory/
-│   └── hosts.ini                       # Example inventory (copy and populate)
+│   └── hosts.ini                        # Reference only - inventory managed in AAP
 ├── group_vars/
-│   ├── bigip.yml                       # Shared BIG-IP variables
-│   └── f5os.yml                        # Shared F5OS variables
-├── host_vars/                          # Per-device variable overrides
-├── snapshots/                          # Snapshot JSON output (git-ignored)
+│   ├── bigip_ha.yml                     # Connection + defaults for bigip_ha group
+│   ├── bigip.yml                        # Connection + defaults for bigip_standalone group
+│   └── f5os.yml                        # Connection + defaults for F5OS groups
 ├── playbooks/
 │   ├── BIG-IP/
-│   │   └── Upgrades/
-│   │       ├── standalone/
-│   │       │   ├── upgrade.yaml
-│   │       │   └── vars/upgrade_vars.yml
-│   │       └── ha/
-│   │           ├── upgrade.yaml
-│   │           └── vars/upgrade_vars.yml
-│   ├── F5OS/
-│   │   └── Upgrades/
-│   │       ├── rSeries/
-│   │       │   ├── upgrade.yaml
-│   │       │   └── vars/upgrade_vars.yml
-│   │       └── Velos/
-│   │           ├── upgrade.yaml
-│   │           └── vars/upgrade_vars.yml
-│   └── Common/
-│       └── Snapshots/                  # Standalone snapshot playbooks
+│   │   ├── Upgrades/
+│   │   │   ├── ha/
+│   │   │   │   ├── upgrade.yaml         # HA pair upgrade (9 plays)
+│   │   │   │   └── extra_vars/
+│   │   │   │       └── upgrade_vars.yml
+│   │   │   └── standalone/
+│   │   │       ├── upgrade.yaml         # Standalone upgrade (5 plays)
+│   │   │       └── extra_vars/
+│   │   │           └── upgrade_vars.yml
+│   │   └── Tests/
+│   │       └── test_software_install.yaml  # Socket isolation test playbook
+│   └── F5OS/
+│       └── Upgrades/
+│           ├── rSeries/
+│           │   └── upgrade.yaml         # 🚧 Work in progress
+│           └── Velos/
+│               └── upgrade.yaml         # 🚧 Work in progress
 └── roles/
-    ├── bigip_wait/                     # Layered post-reboot readiness wait
-    ├── bigip_upgrade/                  # BIG-IP image upload + install + reboot
-    ├── snapshot_pre/                   # Pre-upgrade state capture
-    ├── snapshot_post/                  # Post-upgrade state capture + diff
-    ├── snapshot_report/                # Stdout summary of diff results
-    └── f5os_upgrade/
-        ├── rseries/                    # F5OS rSeries image import + upgrade
-        └── velos/                      # F5OS Velos controller + partition upgrade
+    ├── bastion_image_push/              # Stage ISO from bastion CIFS to BIG-IP
+    ├── bastion_storage/                 # Store artifacts from EE to bastion CIFS
+    ├── bigip_upgrade/                   # Install and activate image via module
+    ├── bigip_wait/                      # Layered post-reboot readiness checks
+    ├── snapshot_pre/                    # Baseline state capture (all partitions)
+    ├── snapshot_post/                   # Post-upgrade capture + diff + regression check
+    └── snapshot_report/                 # AAP stdout diff summary
 ```
 
 ---
@@ -54,187 +62,256 @@ f5-bd-ansible-f5-upgrades/
 ## Requirements
 
 ### Ansible
-- Ansible Core >= 2.12
-- Ansible Automation Platform 2.x (if running via AAP)
+- Ansible Core >= 2.15
+- Ansible Automation Platform 2.6 (AAP)
 
 ### Collections
-Install all required collections:
 ```bash
 ansible-galaxy collection install -r collections/requirements.yml
 ```
 
-| Collection | Purpose | Min Version |
-|---|---|---|
-| `f5networks.f5_bigip` | BIG-IP iControl REST modules | >= 1.0.0 |
-| `f5networks.f5os` | F5OS REST modules | >= 1.0.0 |
-| `f5networks.f5_modules` | Legacy BIG-IP modules (13.x fallback) | >= 1.0.0 |
-| `ansible.utils` | JSON diff / IP address filters | >= 2.0.0 |
-| `ansible.posix` | File/copy utilities | >= 1.0.0 |
-| `ansible.netcommon` | Network connection plugins | >= 2.0.0 |
-| `community.general` | General utilities | >= 4.0.0 |
+| Collection | Purpose |
+|---|---|
+| `f5networks.f5_bigip` | BIG-IP iControl REST modules (httpapi) |
+| `f5networks.f5os` | F5OS REST modules |
+| `ansible.netcommon` | Network connection plugins |
+
+### Bastion Requirements
+- `sshpass` installed on the bastion host
+  ```bash
+  sudo yum install -y sshpass   # RHEL/Rocky
+  sudo apt install -y sshpass   # Ubuntu
+  ```
 
 ### BIG-IP Compatibility
-- BIG-IP **13.1+** (v13 floor — uses `/mgmt/shared/echo` for REST readiness, not `/mgmt/tm/sys/ready`)
-
-### F5OS Compatibility
-- F5OS-A (rSeries) — tested on 1.x+
-- F5OS-C (Velos) — tested on 1.x+
+- BIG-IP 13.1+ (uses `/mgmt/shared/echo` for REST readiness)
+- Tested on 16.1.x → 17.5.x upgrades
 
 ---
 
-## Quick Start
+## Network Topology
 
-### 1. Clone and configure inventory
-```bash
-git clone https://github.com/f5devcentral/f5-bd-ansible-f5-upgrades
-cd f5-bd-ansible-f5-upgrades
-cp inventory/hosts.ini inventory/my_hosts.ini
-# Edit my_hosts.ini with your device IPs and groups
+```
+AAP EE  <── HTTPS/SSH ──>  BIG-IP mgmt
+   │
+   └── SSH ──> bastion
+                  │
+                  └── CIFS mount  /mnt/software/F5/BIGIP/   (ISO images)
+                                  /mnt/software/F5-Backups/  (UCS + snapshots)
 ```
 
-### 2. Install collections
-```bash
-ansible-galaxy collection install -r collections/requirements.yml
+- **Image transfer**: bastion reads ISO from CIFS, uploads to BIG-IP via `sshpass + SCP`
+- **Backup storage**: UCS and snapshot JSONs flow `BIG-IP → EE → bastion CIFS`
+- The bastion has no direct HTTPS path to BIG-IP
+
+---
+
+## BIG-IP HA Pair Upgrade
+
+### Upgrade Flow
+
+```
+Play 0  Pre-flight        Validate vars, detect live HA role (active/standby),
+                          check versions, detect split-brain resume condition
+Play 1  Image staging     bastion SCP → BIG-IP /shared/images/ (both nodes)
+Play 2  Pre-snapshot      Collect VS, pools, routes, ARP, sync state (both nodes)
+Play 3  Upgrade standby   Install + activate → URI volume poll → reboot → bigip_wait
+Play 4  Verify standby    Post-snapshot + diff report on standby
+Play 5  Failover          Force active → standby on original active node
+Play 6  Upgrade active    Install + activate → URI volume poll → reboot → bigip_wait
+Play 7  Failback          Optional: restore original active/standby roles
+Play 8  Final snapshot    Post-snapshot + diff report (both nodes)
+Play 9  Store artifacts   Copy JSONs + UCS from EE to bastion CIFS
 ```
 
-### 3. Stage software images
-Place ISO/image files on your Ansible controller at the path set in `bigip_image_local_path` (default `/mnt/software/bigip`) or `f5os_image_local_path` (default `/mnt/software/f5os`).
+### Split-Brain Detection
 
-### 4. Run an upgrade
+If a previous upgrade run was interrupted after one node was upgraded but before the second node, the playbook detects this automatically:
+- Node already on target version → `bigip_already_upgraded: true` → skipped
+- Peer node disconnected due to version mismatch → allowed to proceed
+- Genuinely out of sync (not version mismatch) → aborted with clear message
 
-**BIG-IP Standalone:**
-```bash
-ansible-playbook playbooks/BIG-IP/Upgrades/standalone/upgrade.yaml \
-  -i inventory/my_hosts.ini \
-  -e "bigip_target_version=17.1.1 bigip_image_filename=BIGIP-17.1.1-0.0.4.iso" \
-  --limit bigip-standalone-01
+### AAP Job Template Setup
+
+| Field | Value |
+|---|---|
+| Playbook | `playbooks/BIG-IP/Upgrades/ha/upgrade.yaml` |
+| Inventory | `bigip_ha` group |
+| Credential | AAP Machine Credential (BIG-IP admin) + bastion Machine Credential |
+| Extra Variables | Paste from `extra_vars/upgrade_vars.yml` |
+
+### Key Extra Variables
+
+```yaml
+bigip_target_version: "17.5.1"
+bigip_image_filename: "BIGIP-17.5.1.5-0.0.6.iso"
+bastion_image_path: "/mnt/software/F5/BIGIP/17.x/17.5.1"
+bastion_backup_root: "/mnt/software/F5-Backups/bigip-backups"
+bigip_install_volume: "HD1.2"
+ansible_command_timeout: 600
 ```
 
-**BIG-IP HA Pair:**
-```bash
-ansible-playbook playbooks/BIG-IP/Upgrades/ha/upgrade.yaml \
-  -i inventory/my_hosts.ini \
-  -e "bigip_target_version=17.1.1 bigip_image_filename=BIGIP-17.1.1-0.0.4.iso" \
-  --limit bigip_ha_pair01
+> **WARNING**: Do NOT include `ansible_connection`, `ansible_network_os`, or `ansible_httpapi_*` in AAP Extra Variables — they override inventory group vars and break bastion delegation.
+
+---
+
+## BIG-IP Standalone Upgrade
+
+### Upgrade Flow
+
+```
+Play 0  Pre-flight        Validate vars, check version, set timestamps
+Play 1  Image staging     bastion SCP → BIG-IP /shared/images/
+Play 2  Pre-snapshot      Collect VS, pools, routes, ARP, sync state
+Play 3  Upgrade           Install + activate → URI volume poll → reboot → bigip_wait
+                          NOTE: Device is OFFLINE during reboot - schedule maintenance window
+Play 4  Post-snapshot     Post-upgrade state capture + diff report
+Play 5  Store artifacts   Copy JSONs + UCS from EE to bastion CIFS
 ```
 
-**F5OS rSeries:**
-```bash
-ansible-playbook playbooks/F5OS/Upgrades/rSeries/upgrade.yaml \
-  -i inventory/my_hosts.ini \
-  -e "f5os_image_filename=F5OS-A-1.8.0-13798.R4R5.iso" \
-  --limit rseries-r2600-01
+### AAP Job Template Setup
+
+| Field | Value |
+|---|---|
+| Playbook | `playbooks/BIG-IP/Upgrades/standalone/upgrade.yaml` |
+| Inventory | `bigip_standalone` group |
+| Credential | AAP Machine Credential (BIG-IP admin) + bastion Machine Credential |
+| Extra Variables | Paste from `extra_vars/upgrade_vars.yml` |
+
+---
+
+## Image Install Flow (Both HA and Standalone)
+
+The `bigip_upgrade` role uses the following pattern due to a known socket issue with the `f5networks.f5_bigip` collection:
+
+```
+1. bigip_software_install state=activated
+   └── Triggers install. httpapi socket dies here (known module bug - ticket raised).
+
+2. Pause 120s
+   └── Allows BIG-IP to pass the 0% startup phase before polling begins.
+
+3. URI poll /mgmt/tm/sys/software/volume/HD1.2 every 30s (up to 30 min)
+   └── Exit when:
+       a. status == 'complete'   → install done, pause 6 min for reboot to start
+       b. 'restarting' in status → device already rebooting
+       c. non-200 response       → device unreachable, mid-reboot
+
+4. bigip_wait role
+   └── Layered readiness checks (see below)
 ```
 
-**F5OS Velos:**
-```bash
-ansible-playbook playbooks/F5OS/Upgrades/Velos/upgrade.yaml \
-  -i inventory/my_hosts.ini \
-  -e "f5os_image_filename=F5OS-C-1.8.0-3198.CHASSIS.iso" \
-  --limit velos-chassis-01-ctrl:velos-chassis-01-part1
+> **Known Issue**: `bigip_software_install` with `volume_uri` polling fails after `state=activated` because the httpapi persistent socket is destroyed during the install process. URI polling is used as a workaround. Ticket raised against `f5networks.f5_bigip`.
+
+---
+
+## Post-Reboot Readiness (bigip_wait)
+
+```
+Check  SSH already up?     → If yes, skip port down/up layers (device came back
+                              during install pause) and go straight to REST checks
+
+Layer 1  SSH port DOWN      → Confirms reboot started (ignored if already up)
+Layer 2  SSH port UP        → Kernel + sshd running (skipped if already up)
+Layer 3  HTTPS port UP      → Web stack listening
+Layer 4  /mgmt/shared/echo  → Returns {"stage":"STARTED"} when REST initialised
+Layer 5  /mgmt/tm/sys/version → mcpd config plane ready
+Layer 6a /mgmt/tm/ltm/virtual → LTM config loaded
+Layer 6b /mgmt/tm/cm/sync-status → HA awareness confirmed
+         └── If sync == 'offline': retry every 20s for up to 5 minutes
 ```
 
 ---
 
 ## Snapshot & Diff
 
-Every upgrade run produces a JSON diff file in the `snapshots/` directory:
+Every upgrade run produces three JSON files per device stored on the bastion:
+
 ```
-snapshots/
+/mnt/software/F5-Backups/bigip-backups/<hostname>/<date>/
   <hostname>_<timestamp>_pre.json
   <hostname>_<timestamp>_post.json
   <hostname>_<timestamp>_diff.json
+  pre_upgrade_<hostname>_<timestamp>.ucs
 ```
 
 ### What is captured
 
-| Data Point | BIG-IP | F5OS |
-|---|:---:|:---:|
-| Virtual server status (up/down) | ✅ | — |
-| Pool member health | ✅ | — |
-| Route table | ✅ | — |
-| ARP table | ✅ | — |
-| Running config hash | ✅ | — |
-| UCS backup | ✅ | — |
-| Tenant status | — | ✅ |
-| Platform software version | ✅ | ✅ |
+| Data | Method | Notes |
+|---|---|---|
+| Virtual server status | `bigip_device_info` | All partitions via partition loop |
+| Pool member health | `bigip_device_info` | All partitions via partition loop |
+| Sync status | `bigip_device_info` | |
+| System version | `bigip_device_info` | |
+| Route table | `bigip_command` tmsh | stdout lines |
+| ARP table | `bigip_command` tmsh | stdout lines |
+| HA failover state | `uri` | No module subset available |
+| UCS backup | `bigip_ucs_fetch` | Saved pre-upgrade only |
 
-### Snapshot-only run (no upgrade)
-```bash
-# Pre-snapshot only
-ansible-playbook playbooks/BIG-IP/Upgrades/standalone/upgrade.yaml \
-  --tags pre_snapshot --limit bigip-standalone-01
+### Multi-Partition Collection
 
-# Post-snapshot + diff only (after manual upgrade)
-ansible-playbook playbooks/BIG-IP/Upgrades/standalone/upgrade.yaml \
-  --tags post_snapshot --limit bigip-standalone-01
-```
+Partitions are collected in two passes to capture VSes in all non-Common partitions (e.g. `T1-JuiceShop/WebApp-VIP`):
+1. `gather_subset: partitions` — get all partition names
+2. Loop `bigip_device_info` with `gather_subset: virtual-servers, ltm-pools` per partition
 
----
+### Regression Detection
 
-## BIG-IP Reboot Wait Strategy
-
-The `bigip_wait` role uses a layered approach to avoid false-positive readiness (TCP port up but REST not ready):
-
-```
-1. Wait for SSH port 22 to go DOWN  → confirms reboot actually started
-2. Wait for SSH port 22 to come UP  → kernel + SSH stack running
-3. Wait for HTTPS port 443 to come UP → web stack listening
-4. Poll /mgmt/shared/echo            → returns {"stage":"STARTED"} only
-                                        when REST is fully initialised
-                                        (works BIG-IP 13.1+)
-5. Optional mcpd check via tmsh      → confirms config sync is ready
-```
-
-Connection drops during reboot are handled via `ignore_errors: true` on the reboot trigger task with all wait tasks delegated to `localhost`.
+The diff report fails the play if any virtual server that was `available` pre-upgrade is not `available` post-upgrade. Sync state changes are **not** treated as regressions — version mismatch between HA nodes always causes `Disconnected` sync state during the upgrade window.
 
 ---
 
 ## Variables Reference
 
-### BIG-IP Upgrade Variables
+### BIG-IP Common
 
 | Variable | Default | Description |
 |---|---|---|
-| `bigip_target_version` | — | Version to verify post-upgrade |
-| `bigip_image_filename` | — | ISO filename in `bigip_image_local_path` |
-| `bigip_image_local_path` | `/mnt/software/bigip` | Controller path to image staging dir |
+| `bigip_target_version` | required | Version string to verify post-upgrade |
+| `bigip_image_filename` | required | ISO filename on bastion CIFS |
+| `bastion_image_path` | required | Full path to ISO on bastion |
+| `bastion_backup_root` | required | Root path for backups on bastion |
 | `bigip_install_volume` | `HD1.2` | Boot volume to install to |
-| `bigip_reboot_after_install` | `true` | Reboot after install |
-| `bigip_upgrade_dry_run` | `false` | Skip reboot (stage only) |
-| `bigip_reboot_initial_delay` | `60` | Seconds before starting port probes |
-| `bigip_wait_retry_delay` | `20` | Seconds between REST probe retries |
-| `bigip_wait_max_retries` | `30` | Max REST probe attempts (~10 min) |
-| `bigip_failback` | `false` | (HA only) Fail back after upgrade |
+| `bigip_reboot_after_install` | `true` | Activate after install |
+| `bigip_upgrade_dry_run` | `false` | Skip install and reboot |
+| `bigip_https_port` | `443` | BIG-IP management HTTPS port |
+| `bigip_ssh_port` | `22` | BIG-IP SSH port |
+| `bigip_reboot_initial_delay` | `60` | Seconds before bigip_wait starts probing |
+| `bigip_wait_retry_delay` | `20` | Seconds between readiness probe retries |
+| `bigip_wait_max_retries` | `30` | Max readiness probe attempts |
+| `snapshot_output_dir` | `/runner/artifacts/snapshots` | EE staging dir for snapshots |
+| `bigip_snapshot_save_ucs` | `true` | Save UCS backup pre-upgrade |
+| `snapshot_fail_on_regression` | `true` | Fail play if VS regressions detected |
+| `ansible_command_timeout` | `600` | httpapi persistent connection timeout |
 
-### F5OS Upgrade Variables
+### BIG-IP HA Only
 
 | Variable | Default | Description |
 |---|---|---|
-| `f5os_image_filename` | — | ISO filename in `f5os_image_local_path` |
-| `f5os_image_local_path` | `/mnt/software/f5os` | Controller path to image staging dir |
-| `f5os_set_next_boot` | `true` | Set staged image as next boot |
-| `f5os_reboot_after_stage` | `true` | Reboot after staging |
-| `f5os_upgrade_dry_run` | `false` | Skip reboot (stage only) |
-| `f5os_reboot_initial_delay` | `90` | Seconds before starting probes |
-| `f5os_wait_retry_delay` | `30` | Seconds between probe retries |
-| `f5os_wait_max_retries` | `40` | Max probe attempts (~20 min) |
-| `f5os_velos_upgrade_controller_first` | `true` | (Velos) Upgrade controller before partitions |
+| `bigip_failback` | `false` | Fail back to original active after upgrade |
 
 ---
 
-## Development Roadmap
+## F5OS Upgrades
 
-- [x] Repo scaffold, inventory, group_vars, playbooks
-- [ ] `bigip_wait` role — layered reboot wait tasks
-- [ ] `snapshot_pre` role — baseline state capture tasks
-- [ ] `snapshot_post` role — post-upgrade capture + JSON diff tasks
-- [ ] `snapshot_report` role — stdout diff summary
-- [ ] `bigip_upgrade` role — image upload + install + reboot tasks
-- [ ] `f5os_upgrade/rseries` role — rSeries image import + upgrade tasks
-- [ ] `f5os_upgrade/velos` role — Velos controller + partition upgrade tasks
-- [ ] AAP Job Template examples
-- [ ] Vault-encrypted credential examples
+> 🚧 **Work in progress** — F5OS rSeries and Velos upgrade playbooks are not yet implemented. Placeholder playbooks exist at:
+> - `playbooks/F5OS/Upgrades/rSeries/upgrade.yaml`
+> - `playbooks/F5OS/Upgrades/Velos/upgrade.yaml`
+
+---
+
+## Troubleshooting
+
+### `ansible_command_timeout` errors
+Set `ansible_command_timeout: 600` in the AAP inventory group variables for `bigip_ha` and `bigip_standalone` groups. The default 30 seconds is too short for `bigip_device_info` which makes internal AS3/package checks on initialization.
+
+### Image transfer permission denied
+The bastion needs `sshpass` installed. The BIG-IP SSH host key must not be stale in the bastion's `known_hosts` — the playbook handles this automatically with `ssh-keygen -R` before each transfer.
+
+### Socket path errors on bigip_software_install
+Known issue with `f5networks.f5_bigip` — the httpapi socket is destroyed after `state=activated`. The role works around this with URI polling. See the test playbook at `playbooks/BIG-IP/Tests/test_software_install.yaml` to validate module behaviour in your environment.
+
+### bigip_wait timing out on SSH port down
+If the device rebooted during the install pause the SSH port will already be up when `bigip_wait` runs. The role detects this and skips the port down/up layers automatically.
 
 ---
 

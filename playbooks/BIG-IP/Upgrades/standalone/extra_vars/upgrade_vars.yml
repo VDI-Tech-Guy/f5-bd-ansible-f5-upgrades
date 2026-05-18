@@ -1,0 +1,101 @@
+---
+# =============================================================================
+# BIG-IP Standalone Upgrade - AAP Extra Variables
+# =============================================================================
+# AAP 2.6: Job Template > Extra Variables > paste this content, update values.
+#
+# Network topology:
+#   bastion  <-- SSH -->  AAP EE  <-- SSH/HTTPS -->  BIG-IP
+#   bastion  <-- SSH -->  AAP EE  <-- SSH/HTTPS -->  BIG-IP
+#
+# Image transfer: bastion SCPs directly to BIG-IP /shared/images/
+# Backup storage: BIG-IP -> bigip_ucs_fetch module -> EE -> copy -> bastion CIFS
+#
+# Bastion connection (user/password/become) comes from the AAP Machine
+# Credential. No connection vars belong in this file.
+#
+# WARNING: Do NOT include any of the following in AAP Extra Variables.
+# They belong in group_vars/bigip.yml and inventory only. If set in
+# extra_vars they override everything including bastion delegation:
+#   ansible_connection
+#   ansible_network_os
+#   ansible_httpapi_port
+#   ansible_httpapi_use_ssl
+#   ansible_httpapi_validate_certs
+# =============================================================================
+
+# =============================================================================
+# CONNECTION TIMEOUTS
+# ansible_command_timeout controls how long the persistent httpapi connection
+# waits for module responses. Default is 30s which is too short for
+# bigip_device_info which makes internal AS3/package checks on init.
+# Set here in extra_vars to ensure AAP picks it up (highest precedence).
+# =============================================================================
+ansible_command_timeout: 600
+
+
+
+# Target BIG-IP software version (used for post-upgrade version verification)
+bigip_target_version: "17.1.1"
+
+# ISO filename - must exist at {{ bastion_image_path }}/{{ bigip_image_filename }}
+bigip_image_filename: "BIGIP-17.1.1-0.0.4.iso"
+
+# =============================================================================
+# BASTION - CIFS path vars
+# =============================================================================
+
+# Root of CIFS mount on bastion where BIG-IP ISOs are staged
+bastion_image_path: "/mnt/cifs/bigip-images"
+
+# Root of CIFS mount on bastion where backups are stored
+# Structure: {{ bastion_backup_root }}/<device-hostname>/<date>/
+bastion_backup_root: "/mnt/cifs/bigip-backups"
+
+# =============================================================================
+# EE STAGING
+# Used only for snapshot JSONs and UCS files before bastion push.
+# Images are uploaded directly from bastion to BIG-IP via curl (HTTPS).
+# =============================================================================
+
+# Staging dir for snapshot JSON and UCS files before bastion push
+snapshot_output_dir: "/runner/artifacts/snapshots"
+
+# =============================================================================
+# INSTALL OPTIONS
+# =============================================================================
+
+bigip_install_volume: "HD1.2"
+bigip_reboot_after_install: true
+bigip_upgrade_dry_run: false
+
+# =============================================================================
+# HA OPTIONS
+# =============================================================================
+
+
+# =============================================================================
+# WAIT / REBOOT TIMING
+# =============================================================================
+
+bigip_reboot_initial_delay: 60
+bigip_wait_retry_delay: 20
+bigip_wait_max_retries: 30
+bigip_ssh_port: 22
+bigip_https_port: 443
+
+# =============================================================================
+# SNAPSHOT / BACKUP SETTINGS
+# =============================================================================
+
+# Fetch UCS from BIG-IP and store on bastion
+bigip_snapshot_save_ucs: true
+
+# BIG-IP directory where UCS files are saved before fetch
+bigip_ucs_path: "/var/local/ucs"
+
+# Fail the post-snapshot play if regressions detected
+snapshot_fail_on_regression: true
+
+# Pool members allowed to be down post-upgrade (0 = none)
+snapshot_pool_member_down_threshold_pct: 0

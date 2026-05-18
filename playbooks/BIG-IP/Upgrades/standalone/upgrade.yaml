@@ -2,48 +2,156 @@
 # =============================================================================
 # BIG-IP Standalone Upgrade Playbook
 # =============================================================================
-# Usage:
-#   ansible-playbook playbooks/BIG-IP/Upgrades/standalone/upgrade.yaml \
-#     -i inventory/hosts.ini \
-#     -e "bigip_target_version=17.1.1 bigip_image_filename=BIGIP-17.1.1-0.0.4.iso" \
-#     --limit bigip-standalone-01
+# Upgrade order:
+#   0. Pre-flight    - validate extra_vars, check version, set timestamps
+#   1. Image staging - bastion CIFS -> SCP -> BIG-IP
+#   2. Pre-snapshot  - collect baseline state
+#   3. Upgrade       - install and activate image, wait for device to return
+#   4. Post-snapshot - collect post-upgrade state, diff, report
+#   5. Store artifacts on bastion (JSON diffs + UCS)
 #
-# Extra vars:
-#   bigip_target_version   - Version string to verify post-upgrade (e.g. 17.1.1)
-#   bigip_image_filename   - ISO filename present in bigip_image_local_path
-#   bigip_upgrade_dry_run  - Set 'true' to skip reboot (default: false)
+# AAP 2.6 Setup:
+#   Project    : f5-bd-ansible-f5-upgrades
+#   Playbook   : playbooks/BIG-IP/Upgrades/standalone/upgrade.yaml
+#   Inventory  : [bigip_standalone] group
+#   Credential : AAP Machine Credential for BIG-IP devices
+#   Extra Vars : paste contents of extra_vars/upgrade_vars.yml and update values
+#
+# Network topology:
+#   bastion  <-- SSH -->  AAP EE  <-- SSH/HTTPS -->  BIG-IP
+#
+# NOTE: Standalone device will be OFFLINE during upgrade reboot.
+#       Schedule this during a maintenance window.
 # =============================================================================
 
-- name: "BIG-IP Standalone Upgrade - Pre-Snapshot"
+
+# =============================================================================
+# PLAY 0 - Pre-flight: validate extra_vars, check version, set timestamps
+# =============================================================================
+- name: "BIG-IP Standalone Upgrade - Play 0: Pre-flight Checks"
   hosts: "{{ target_hosts | default('bigip_standalone') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
   vars:
-    snapshot_phase: pre
-    snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+    _snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+    _backup_date: "{{ lookup('pipe', 'date +%Y-%m-%d') }}"
+  tasks:
+
+    - name: "PREFLIGHT | Validate required extra vars are set"
+      ansible.builtin.fail:
+        msg: "Missing required extra var: '{{ item }}' - set it in AAP Extra Variables."
+      when: vars[item] is not defined or vars[item] | string | length == 0
+      loop:
+        - bigip_target_version
+        - bigip_image_filename
+        - bastion_image_path
+        - bastion_backup_root
+      delegate_to: localhost
+
+    - name: "PREFLIGHT | Query current software version"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/version"
+        method: GET
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+      register: preflight_version_query
+      delegate_to: localhost
+      # TROUBLESHOOTING: no_log: true
+
+    - name: "PREFLIGHT | Parse version from query response"
+      ansible.builtin.set_fact:
+        bigip_current_version: >-
+          {{ preflight_version_query.json.get('entries', {})
+             .get('https://localhost/mgmt/tm/sys/version/0', {})
+             .get('nestedStats', {})
+             .get('entries', {})
+             .get('Version', {})
+             .get('description', 'unknown') }}
+
+    - name: "PREFLIGHT | Already on target version - nothing to do"
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} is already running {{ bigip_current_version }} - skipping upgrade."
+      when: bigip_target_version in bigip_current_version
+
+    - name: "PREFLIGHT | Skip if already on target version"
+      ansible.builtin.meta: end_host
+      when: bigip_target_version in bigip_current_version
+
+    - name: "PREFLIGHT | Cache snapshot_timestamp and backup_date across all plays"
+      ansible.builtin.set_fact:
+        snapshot_timestamp: "{{ _snapshot_timestamp }}"
+        backup_date: "{{ _backup_date }}"
+        cacheable: true
+
+    - name: "PREFLIGHT | Summary"
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}) |
+          Version: {{ bigip_current_version }} |
+          Target: {{ bigip_target_version }} |
+          Timestamp: {{ snapshot_timestamp }}
+
+
+# =============================================================================
+# PLAY 1 - Image staging: bastion CIFS -> SCP -> BIG-IP
+# =============================================================================
+- name: "BIG-IP Standalone Upgrade - Play 1: Stage Image via Bastion"
+  hosts: "{{ target_hosts | default('bigip_standalone') }}"
+  gather_facts: false
+  roles:
+    - role: bastion_image_push
+  tags: [image, image_push]
+
+
+# =============================================================================
+# PLAY 2 - Pre-snapshot
+# =============================================================================
+- name: "BIG-IP Standalone Upgrade - Play 2: Pre-Snapshot"
+  hosts: "{{ target_hosts | default('bigip_standalone') }}"
+  gather_facts: false
   roles:
     - role: snapshot_pre
   tags: [snapshot, pre_snapshot]
 
-- name: "BIG-IP Standalone Upgrade - Software Install"
+
+# =============================================================================
+# PLAY 3 - Upgrade: install, activate, wait for device to return
+# =============================================================================
+- name: "BIG-IP Standalone Upgrade - Play 3: Upgrade Device"
   hosts: "{{ target_hosts | default('bigip_standalone') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
+  pre_tasks:
+    - name: "UPGRADE | Confirm upgrade target"
+      ansible.builtin.debug:
+        msg: >-
+          Upgrading STANDALONE: {{ inventory_hostname }} ({{ ansible_host }})
+          WARNING: Device will be offline during reboot.
   roles:
     - role: bigip_upgrade
     - role: bigip_wait
   tags: [upgrade]
 
-- name: "BIG-IP Standalone Upgrade - Post-Snapshot & Diff"
+
+# =============================================================================
+# PLAY 4 - Post-snapshot + diff report
+# =============================================================================
+- name: "BIG-IP Standalone Upgrade - Play 4: Post-Snapshot & Diff Report"
   hosts: "{{ target_hosts | default('bigip_standalone') }}"
   gather_facts: false
-  vars_files:
-    - vars/upgrade_vars.yml
-  vars:
-    snapshot_phase: post
   roles:
     - role: snapshot_post
     - role: snapshot_report
   tags: [snapshot, post_snapshot, report]
+
+
+# =============================================================================
+# PLAY 5 - Store artifacts on bastion
+# =============================================================================
+- name: "BIG-IP Standalone Upgrade - Play 5: Store Artifacts on Bastion"
+  hosts: "{{ target_hosts | default('bigip_standalone') }}"
+  gather_facts: false
+  roles:
+    - role: bastion_storage
+  tags: [storage, bastion_storage]
