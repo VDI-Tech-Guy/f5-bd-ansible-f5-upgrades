@@ -2,8 +2,9 @@
 # =============================================================================
 # snapshot_post - Collect post-upgrade state and diff against pre-snapshot
 # =============================================================================
-# Uses f5networks.f5_bigip.bigip_device_info for VS, pools, sync-status,
-# system-info. Routes and ARP use bigip_command. HA failover uses uri.
+# Uses f5networks.f5_bigip.bigip_device_info in two passes:
+#   Pass 1: gather_subset: partitions  - get all partition names
+#   Pass 2: loop over partitions        - collect VS and pool per partition
 # =============================================================================
 
 - name: "SNAPSHOT_POST | Verify pre-snapshot file exists"
@@ -18,25 +19,69 @@
     snapshot_pre_loaded: "{{ lookup('file', snapshot_output_dir + '/' + inventory_hostname + '_' + snapshot_timestamp + '_pre.json') | from_json }}"
   delegate_to: localhost
 
-# -----------------------------------------------------------------------------
-# Reset persistent connection before module calls
-# -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_POST | Reset persistent connection to BIG-IP"
   ansible.builtin.meta: reset_connection
 
 # -----------------------------------------------------------------------------
-# Module call - VS, pools, sync-status, system-info
+# Pass 1 - Get partition list and system-info/sync-status
 # -----------------------------------------------------------------------------
 
-- name: "SNAPSHOT_POST | Collect device info via bigip_device_info module"
+- name: "SNAPSHOT_POST | Pass 1 - collect partitions and system info"
+  f5networks.f5_bigip.bigip_device_info:
+    gather_subset:
+      - partitions
+      - sync-status
+      - system-info
+  register: snap_post_base_info
+
+- name: "SNAPSHOT_POST | Set partition list fact"
+  ansible.builtin.set_fact:
+    snap_post_partition_names: >-
+      {{ snap_post_base_info.partitions | default([]) | map(attribute='name') | list }}
+
+- name: "SNAPSHOT_POST | Display partitions found"
+  ansible.builtin.debug:
+    msg: "Partitions found on {{ inventory_hostname }}: {{ snap_post_partition_names }}"
+
+# -----------------------------------------------------------------------------
+# Pass 2 - Collect VS and pools per partition
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Pass 2 - collect VS and pools per partition"
   f5networks.f5_bigip.bigip_device_info:
     gather_subset:
       - virtual-servers
       - ltm-pools
-      - sync-status
-      - system-info
-  register: snap_post_device_info
+    partition: "{{ item }}"
+  register: snap_post_per_partition
+  loop: "{{ snap_post_partition_names }}"
+  when: snap_post_partition_names | length > 0
+
+- name: "SNAPSHOT_POST | Merge VS results across all partitions"
+  ansible.builtin.set_fact:
+    snap_post_all_virtual_servers: >-
+      {{ snap_post_per_partition.results
+         | selectattr('ansible_facts', 'defined')
+         | map(attribute='ansible_facts')
+         | map(attribute='virtual_servers', default=[])
+         | flatten }}
+  when: snap_post_partition_names | length > 0
+
+- name: "SNAPSHOT_POST | Merge pool results across all partitions"
+  ansible.builtin.set_fact:
+    snap_post_all_ltm_pools: >-
+      {{ snap_post_per_partition.results
+         | selectattr('ansible_facts', 'defined')
+         | map(attribute='ansible_facts')
+         | map(attribute='ltm_pools', default=[])
+         | flatten }}
+  when: snap_post_partition_names | length > 0
+
+- name: "SNAPSHOT_POST | Fallback - empty VS and pool lists if no partitions"
+  ansible.builtin.set_fact:
+    snap_post_all_virtual_servers: []
+    snap_post_all_ltm_pools: []
+  when: snap_post_partition_names | length == 0
 
 # -----------------------------------------------------------------------------
 # Routes and ARP via bigip_command
@@ -89,7 +134,7 @@
 - name: "SNAPSHOT_POST | Normalise - config sync state from module"
   ansible.builtin.set_fact:
     snap_post_sync_state: >-
-      {{ snap_post_device_info.sync_status | default([]) | first
+      {{ snap_post_base_info.sync_status | default([]) | first
          | default({}) | json_query('status') | default('unknown') }}
 
 # -----------------------------------------------------------------------------
@@ -108,11 +153,12 @@
         management_ip: "{{ ansible_host }}"
         phase: post
         timestamp: "{{ snapshot_timestamp }}"
-        version: "{{ snap_post_device_info.system_info.product_version | default('unknown') }}"
+        version: "{{ snap_post_base_info.system_info.product_version | default('unknown') }}"
         ha_failover_state: "{{ snap_post_failover_state }}"
         sync_state: "{{ snap_post_sync_state }}"
-      virtual_servers: "{{ snap_post_device_info.virtual_servers | default([]) }}"
-      ltm_pools: "{{ snap_post_device_info.ltm_pools | default([]) }}"
+        partitions: "{{ snap_post_partition_names }}"
+      virtual_servers: "{{ snap_post_all_virtual_servers | default([]) }}"
+      ltm_pools: "{{ snap_post_all_ltm_pools | default([]) }}"
       routes: "{{ snap_post_routes.stdout_lines | default([]) }}"
       arp: "{{ snap_post_arp.stdout_lines | default([]) }}"
   delegate_to: localhost
@@ -125,10 +171,10 @@
   ansible.builtin.set_fact:
     diff_vs: >-
       {%- set pre_vs = snapshot_pre_loaded.virtual_servers | default([]) -%}
-      {%- set post_vs = snap_post_device_info.virtual_servers | default([]) -%}
+      {%- set post_vs = snap_post_all_virtual_servers | default([]) -%}
       {%- set results = [] -%}
       {%- for post in post_vs -%}
-        {%- set pre = pre_vs | selectattr('name', 'equalto', post.name) | list | first | default({}) -%}
+        {%- set pre = pre_vs | selectattr('full_path', 'equalto', post.full_path) | list | first | default({}) -%}
         {%- set pre_avail = pre.availability_status | default('not_in_pre') -%}
         {%- set post_avail = post.availability_status | default('unknown') -%}
         {%- set pre_enabled = pre.enabled_status | default('not_in_pre') -%}
@@ -138,6 +184,7 @@
         {%- set _ = results.append({
           'name': post.name,
           'full_path': post.full_path | default(post.name),
+          'partition': post.full_path | default('/Common/' + post.name) | regex_replace('^/([^/]+)/.*', '\\1'),
           'pre_availability': pre_avail,
           'post_availability': post_avail,
           'pre_enabled': pre_enabled,
@@ -148,7 +195,7 @@
       {%- endfor -%}
       {{ results }}
 
-- name: "SNAPSHOT_POST | Compute route changes (line count comparison)"
+- name: "SNAPSHOT_POST | Compute route changes"
   ansible.builtin.set_fact:
     diff_routes:
       pre_line_count: "{{ snapshot_pre_loaded.routes | default([]) | length }}"
@@ -159,8 +206,8 @@
   ansible.builtin.set_fact:
     diff_version:
       pre: "{{ snapshot_pre_loaded.metadata.version | default('unknown') }}"
-      post: "{{ snap_post_device_info.system_info.product_version | default('unknown') }}"
-      upgraded: "{{ snapshot_pre_loaded.metadata.version | default('') != snap_post_device_info.system_info.product_version | default('') }}"
+      post: "{{ snap_post_base_info.system_info.product_version | default('unknown') }}"
+      upgraded: "{{ snapshot_pre_loaded.metadata.version | default('') != snap_post_base_info.system_info.product_version | default('') }}"
 
 - name: "SNAPSHOT_POST | Compute HA state change"
   ansible.builtin.set_fact:
