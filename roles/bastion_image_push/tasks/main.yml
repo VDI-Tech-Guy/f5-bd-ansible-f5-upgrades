@@ -23,7 +23,9 @@
   ansible.builtin.stat:
     path: "{{ bastion_image_path }}/{{ bigip_image_filename }}"
   register: bastion_image_stat
-  delegate_to: bastion01
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
   failed_when: not bastion_image_stat.stat.exists
 
 - name: "BASTION_PUSH | Image confirmed on bastion"
@@ -83,7 +85,9 @@
     src: "{{ bastion_image_path }}/{{ bigip_image_filename }}"
     dest: "{{ bigip_ee_staging_dir }}/{{ bigip_image_filename }}"
     flat: true
-  delegate_to: bastion01
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
   when: not bigip_image_already_present | bool
   # BIG-IP ISOs are ~2GB - this will take several minutes
   # fetch does not support async - the EE connection to bastion must stay open

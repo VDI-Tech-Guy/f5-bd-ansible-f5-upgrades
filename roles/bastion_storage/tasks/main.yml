@@ -28,12 +28,14 @@
     path: "{{ bastion_device_backup_path }}"
     state: directory
     mode: '0755'
-  delegate_to: bastion01
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
   become: true
 
 # -----------------------------------------------------------------------------
 # Step 2 - Copy snapshot JSONs from EE /runner/artifacts/ -> bastion
-# ansible.builtin.copy with delegate_to: bastion01 reads src on the EE and
+# ansible.builtin.copy with delegate_to: bastion reads src on the EE and
 # writes dest on the bastion over the existing SSH connection
 # -----------------------------------------------------------------------------
 
@@ -42,7 +44,9 @@
     src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json"
     dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json"
     mode: '0644'
-  delegate_to: bastion01
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
   become: true
 
 - name: "BASTION_STORAGE | Copy post-snapshot JSON to bastion"
@@ -50,7 +54,9 @@
     src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json"
     dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post.json"
     mode: '0644'
-  delegate_to: bastion01
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
   become: true
 
 - name: "BASTION_STORAGE | Copy diff JSON to bastion"
@@ -58,7 +64,9 @@
     src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json"
     dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json"
     mode: '0644'
-  delegate_to: bastion01
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
   become: true
 
 # -----------------------------------------------------------------------------
@@ -103,7 +111,9 @@
     src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs"
     dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_upgrade.ucs"
     mode: '0644'
-  delegate_to: bastion01
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
   become: true
   when:
     - bigip_snapshot_save_ucs | default(true) | bool
@@ -131,12 +141,14 @@
     paths: "{{ bastion_device_backup_path }}"
     patterns: "{{ inventory_hostname }}_{{ snapshot_timestamp }}*"
   register: bastion_stored_files
-  delegate_to: bastion01
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
 
 - name: "BASTION_STORAGE | Confirm files stored on bastion"
   ansible.builtin.debug:
     msg: >-
-      Files stored at bastion01:{{ bastion_device_backup_path }}
+      Files stored at bastion:{{ bastion_device_backup_path }}
       {% for f in bastion_stored_files.files | sort(attribute='path') %}
         {{ f.path | basename }} ({{ (f.size / 1024) | round(1) }} KB)
       {% endfor %}
