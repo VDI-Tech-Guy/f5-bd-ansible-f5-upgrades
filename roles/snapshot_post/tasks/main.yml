@@ -2,6 +2,8 @@
 # =============================================================================
 # snapshot_post - Collect post-upgrade state and diff against pre-snapshot
 # =============================================================================
+# Uses f5networks.f5_bigip.bigip_device_info module for all LTM/system data.
+#
 # Reads pre-snapshot from:
 #   {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
 # Writes post-snapshot to:
@@ -23,73 +25,18 @@
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
-# Collect post-upgrade state
+# Collect post-upgrade state via module
 # -----------------------------------------------------------------------------
 
-- name: "SNAPSHOT_POST | Get virtual server status"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/ltm/virtual/stats"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_post_vs
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
-
-- name: "SNAPSHOT_POST | Get pool member status"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/ltm/pool/stats"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_post_pools
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
-
-- name: "SNAPSHOT_POST | Get route table"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/net/route"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_post_routes
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
-
-- name: "SNAPSHOT_POST | Get ARP table"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/net/arp/stats"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_post_arp
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
-
-- name: "SNAPSHOT_POST | Get software version"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/version"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_post_version
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
+- name: "SNAPSHOT_POST | Collect device info via bigip_device_info module"
+  f5networks.f5_bigip.bigip_device_info:
+    gather_subset:
+      - virtual-servers
+      - ltm-pools
+      - routes
+      - arp
+      - system-info
+  register: snap_post_device_info
 
 - name: "SNAPSHOT_POST | Get HA failover state"
   ansible.builtin.uri:
@@ -100,8 +47,12 @@
     force_basic_auth: true
     validate_certs: false
     status_code: 200
+    timeout: 60
   register: snap_post_failover
   delegate_to: localhost
+  retries: 5
+  delay: 15
+  until: snap_post_failover.status == 200
   # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_POST | Get config sync state"
@@ -113,23 +64,17 @@
     force_basic_auth: true
     validate_certs: false
     status_code: 200
+    timeout: 60
   register: snap_post_sync
   delegate_to: localhost
+  retries: 5
+  delay: 15
+  until: snap_post_sync.status == 200
   # TROUBLESHOOTING: no_log: true
 
 # -----------------------------------------------------------------------------
-# Normalise response values - same pattern as snapshot_pre
+# Normalise HA state values
 # -----------------------------------------------------------------------------
-
-- name: "SNAPSHOT_POST | Normalise - software version"
-  ansible.builtin.set_fact:
-    snap_post_version_str: >-
-      {{ snap_post_version.json.get('entries', {})
-         .get('https://localhost/mgmt/tm/sys/version/0', {})
-         .get('nestedStats', {})
-         .get('entries', {})
-         .get('Version', {})
-         .get('description', 'unknown') }}
 
 - name: "SNAPSHOT_POST | Normalise - HA failover state"
   ansible.builtin.set_fact:
@@ -139,7 +84,6 @@
          else 'standby' }}
 
 - name: "SNAPSHOT_POST | Normalise - config sync state"
-  # Key confirmed: https://localhost/mgmt/tm/cm/sync-status/0/stats
   ansible.builtin.set_fact:
     snap_post_sync_state: >-
       {{ snap_post_sync.json.get('entries', {})
@@ -165,13 +109,13 @@
         management_ip: "{{ ansible_host }}"
         phase: post
         timestamp: "{{ snapshot_timestamp }}"
-        version: "{{ snap_post_version_str }}"
+        version: "{{ snap_post_device_info.system_info.product_version | default('unknown') }}"
         ha_failover_state: "{{ snap_post_failover_state }}"
         sync_state: "{{ snap_post_sync_state }}"
-      virtual_servers: "{{ snap_post_vs.json.entries | default({}) }}"
-      pools: "{{ snap_post_pools.json.entries | default({}) }}"
-      routes: "{{ snap_post_routes.json['items'] | default([]) }}"
-      arp: "{{ snap_post_arp.json.entries | default({}) }}"
+      virtual_servers: "{{ snap_post_device_info.virtual_servers | default([]) }}"
+      ltm_pools: "{{ snap_post_device_info.ltm_pools | default([]) }}"
+      routes: "{{ snap_post_device_info.routes | default([]) }}"
+      arp: "{{ snap_post_device_info.arp | default([]) }}"
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
@@ -181,19 +125,20 @@
 - name: "SNAPSHOT_POST | Compute virtual server state changes"
   ansible.builtin.set_fact:
     diff_vs: >-
-      {%- set pre_entries = snapshot_pre_loaded.virtual_servers | default({}) -%}
-      {%- set post_entries = snap_post_vs.json.entries | default({}) -%}
+      {%- set pre_vs = snapshot_pre_loaded.virtual_servers | default([]) -%}
+      {%- set post_vs = snap_post_device_info.virtual_servers | default([]) -%}
       {%- set results = [] -%}
-      {%- for key in post_entries -%}
-        {%- set post_avail = post_entries[key].nestedStats.entries.status.availabilityState.description | default('unknown') -%}
-        {%- set post_enabled = post_entries[key].nestedStats.entries.status.enabledState.description | default('unknown') -%}
-        {%- set pre_avail = pre_entries[key].nestedStats.entries.status.availabilityState.description | default('not_in_pre') if key in pre_entries else 'not_in_pre' -%}
-        {%- set pre_enabled = pre_entries[key].nestedStats.entries.status.enabledState.description | default('not_in_pre') if key in pre_entries else 'not_in_pre' -%}
-        {%- set vs_name = post_entries[key].nestedStats.entries['tmName'].description | default(key) -%}
+      {%- for post in post_vs -%}
+        {%- set pre = pre_vs | selectattr('name', 'equalto', post.name) | list | first | default({}) -%}
+        {%- set pre_avail = pre.availability_status | default('not_in_pre') -%}
+        {%- set post_avail = post.availability_status | default('unknown') -%}
+        {%- set pre_enabled = pre.enabled_status | default('not_in_pre') -%}
+        {%- set post_enabled = post.enabled_status | default('unknown') -%}
         {%- set changed = (pre_avail != post_avail) or (pre_enabled != post_enabled) -%}
         {%- set regressed = (pre_avail == 'available' and post_avail != 'available') -%}
         {%- set _ = results.append({
-          'name': vs_name,
+          'name': post.name,
+          'full_path': post.full_path | default(post.name),
           'pre_availability': pre_avail,
           'post_availability': post_avail,
           'pre_enabled': pre_enabled,
@@ -208,18 +153,18 @@
   ansible.builtin.set_fact:
     diff_routes:
       pre_count: "{{ snapshot_pre_loaded.routes | default([]) | length }}"
-      post_count: "{{ snap_post_routes.json['items'] | default([]) | length }}"
-      added: "{{ (snap_post_routes.json['items'] | default([]) | map(attribute='name') | list)
+      post_count: "{{ snap_post_device_info.routes | default([]) | length }}"
+      added: "{{ (snap_post_device_info.routes | default([]) | map(attribute='name') | list)
                  | difference(snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list) }}"
       removed: "{{ (snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list)
-                   | difference(snap_post_routes.json['items'] | default([]) | map(attribute='name') | list) }}"
+                   | difference(snap_post_device_info.routes | default([]) | map(attribute='name') | list) }}"
 
 - name: "SNAPSHOT_POST | Compute version change"
   ansible.builtin.set_fact:
     diff_version:
       pre: "{{ snapshot_pre_loaded.metadata.version | default('unknown') }}"
-      post: "{{ snap_post_version_str }}"
-      upgraded: "{{ snapshot_pre_loaded.metadata.version | default('') != snap_post_version_str }}"
+      post: "{{ snap_post_device_info.system_info.product_version | default('unknown') }}"
+      upgraded: "{{ snapshot_pre_loaded.metadata.version | default('') != snap_post_device_info.system_info.product_version | default('') }}"
 
 - name: "SNAPSHOT_POST | Compute HA state change"
   ansible.builtin.set_fact:

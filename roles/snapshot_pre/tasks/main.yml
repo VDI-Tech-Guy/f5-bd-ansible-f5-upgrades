@@ -2,16 +2,12 @@
 # =============================================================================
 # snapshot_pre - Collect baseline state before upgrade
 # =============================================================================
-# Captures: virtual server status, pool member health, route table,
-#           ARP table, software version, HA failover state, sync state
-# Output: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
+# Uses f5networks.f5_bigip.bigip_device_info module which handles connection,
+# retries and timeouts internally. Single module call collects all data.
 #
-# Response format notes (varies by BIG-IP version):
-#   /mgmt/tm/sys/failover/stats  -> apiRawValues.apiAnonymous plain text string
-#   /mgmt/tm/cm/sync-status/stats -> nestedStats on most versions, apiRawValues on some
-#   /mgmt/tm/sys/version         -> nestedStats consistently across versions
-#   /mgmt/tm/ltm/virtual/stats   -> nestedStats per-VS entries
-#   /mgmt/tm/ltm/pool/stats      -> nestedStats per-pool entries
+# Captures: virtual server status, pool member health, routes, ARP,
+#           system version, HA failover state, sync state, UCS backup
+# Output: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
 # =============================================================================
 
 - name: "SNAPSHOT_PRE | Ensure snapshot output directory exists on EE"
@@ -20,76 +16,25 @@
     state: directory
     mode: '0755'
   delegate_to: localhost
-  run_once: false
 
 # -----------------------------------------------------------------------------
-# Collect raw data via iControl REST
+# Single module call collects all LTM/system data
+# Module handles connection management, retries, and timeout internally
 # -----------------------------------------------------------------------------
 
-- name: "SNAPSHOT_PRE | Get virtual server status"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/ltm/virtual/stats"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_virtual_servers
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
+- name: "SNAPSHOT_PRE | Collect device info via bigip_device_info module"
+  f5networks.f5_bigip.bigip_device_info:
+    gather_subset:
+      - virtual-servers
+      - ltm-pools
+      - routes
+      - arp
+      - system-info
+  register: snap_device_info
 
-- name: "SNAPSHOT_PRE | Get pool member status"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/ltm/pool/stats"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_pools
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
-
-- name: "SNAPSHOT_PRE | Get route table"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/net/route"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_routes
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
-
-- name: "SNAPSHOT_PRE | Get ARP table"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/net/arp/stats"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_arp
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
-
-- name: "SNAPSHOT_PRE | Get software version"
-  ansible.builtin.uri:
-    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/version"
-    method: GET
-    user: "{{ ansible_user }}"
-    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
-    force_basic_auth: true
-    validate_certs: false
-    status_code: 200
-  register: snap_version
-  delegate_to: localhost
-  # TROUBLESHOOTING: no_log: true
+# -----------------------------------------------------------------------------
+# Collect HA state separately - not in bigip_device_info subset
+# -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_PRE | Get HA failover state"
   ansible.builtin.uri:
@@ -100,8 +45,12 @@
     force_basic_auth: true
     validate_certs: false
     status_code: 200
+    timeout: 60
   register: snap_failover
   delegate_to: localhost
+  retries: 5
+  delay: 15
+  until: snap_failover.status == 200
   # TROUBLESHOOTING: no_log: true
 
 - name: "SNAPSHOT_PRE | Get config sync state"
@@ -113,30 +62,19 @@
     force_basic_auth: true
     validate_certs: false
     status_code: 200
+    timeout: 60
   register: snap_sync
   delegate_to: localhost
+  retries: 5
+  delay: 15
+  until: snap_sync.status == 200
   # TROUBLESHOOTING: no_log: true
 
 # -----------------------------------------------------------------------------
-# Normalise response values
-# Each REST endpoint may return nestedStats.entries OR apiRawValues.apiAnonymous
-# depending on BIG-IP version. Normalise here into plain string facts so
-# the rest of the role never needs to care about the raw structure.
+# Normalise HA state values
 # -----------------------------------------------------------------------------
 
-- name: "SNAPSHOT_PRE | Normalise - software version"
-  ansible.builtin.set_fact:
-    snap_version_str: >-
-      {{ snap_version.json.get('entries', {})
-         .get('https://localhost/mgmt/tm/sys/version/0', {})
-         .get('nestedStats', {})
-         .get('entries', {})
-         .get('Version', {})
-         .get('description', 'unknown') }}
-
 - name: "SNAPSHOT_PRE | Normalise - HA failover state"
-  # failover/stats returns apiRawValues.apiAnonymous: "Failover active for 0d 03:25:49"
-  # Parse 'active' or 'standby' out of the plain text string.
   ansible.builtin.set_fact:
     snap_failover_state: >-
       {{ 'active' if snap_failover.json.get('apiRawValues', {})
@@ -144,7 +82,6 @@
          else 'standby' }}
 
 - name: "SNAPSHOT_PRE | Normalise - config sync state"
-  # Key confirmed: https://localhost/mgmt/tm/cm/sync-status/0/stats
   ansible.builtin.set_fact:
     snap_sync_state: >-
       {{ snap_sync.json.get('entries', {})
@@ -155,7 +92,7 @@
          .get('description', 'unknown') }}
 
 # -----------------------------------------------------------------------------
-# Save UCS backup on device (stored locally on BIG-IP for later fetch)
+# Save UCS backup
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_PRE | Save and fetch UCS backup from BIG-IP to EE"
@@ -183,24 +120,26 @@
         management_ip: "{{ ansible_host }}"
         phase: pre
         timestamp: "{{ snapshot_timestamp }}"
-        version: "{{ snap_version_str }}"
+        version: "{{ snap_device_info.system_info.product_version | default('unknown') }}"
         ha_failover_state: "{{ snap_failover_state }}"
         sync_state: "{{ snap_sync_state }}"
         ucs_saved: "{{ bigip_snapshot_save_ucs | bool }}"
         ucs_name: >-
           {{ 'pre_upgrade_' + inventory_hostname + '_' + snapshot_timestamp
              if bigip_snapshot_save_ucs | bool else 'not_saved' }}
-      virtual_servers: "{{ snap_virtual_servers.json.entries | default({}) }}"
-      pools: "{{ snap_pools.json.entries | default({}) }}"
-      routes: "{{ snap_routes.json['items'] | default([]) }}"
-      arp: "{{ snap_arp.json.entries | default({}) }}"
+      virtual_servers: "{{ snap_device_info.virtual_servers | default([]) }}"
+      ltm_pools: "{{ snap_device_info.ltm_pools | default([]) }}"
+      routes: "{{ snap_device_info.routes | default([]) }}"
+      arp: "{{ snap_device_info.arp | default([]) }}"
   delegate_to: localhost
 
 - name: "SNAPSHOT_PRE | Summary"
   ansible.builtin.debug:
     msg: >-
       Pre-snapshot complete for {{ inventory_hostname }} |
-      Version: {{ snap_version_str }} |
+      Version: {{ snap_device_info.system_info.product_version | default('unknown') }} |
       HA state: {{ snap_failover_state }} |
       Sync: {{ snap_sync_state }} |
+      VS count: {{ snap_device_info.virtual_servers | default([]) | length }} |
+      Pool count: {{ snap_device_info.ltm_pools | default([]) | length }} |
       File: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
