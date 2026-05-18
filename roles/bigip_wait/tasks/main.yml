@@ -91,7 +91,9 @@
   ansible.builtin.debug:
     msg: >-
       {{ bigip_wait_host }} is back online.
-      Version: {{ bigip_version_check.json.entries
-        ['https://localhost/mgmt/tm/sys/version/0']
-        .nestedStats.entries.Version.description
-        | default('unknown') }}
+      Version: {{ bigip_version_check.json.get('entries', {})
+        .get('https://localhost/mgmt/tm/sys/version/0', {})
+        .get('nestedStats', {})
+        .get('entries', {})
+        .get('Version', {})
+        .get('description', 'unknown') }}

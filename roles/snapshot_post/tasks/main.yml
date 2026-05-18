@@ -23,7 +23,7 @@
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
-# Collect post-upgrade state (same queries as snapshot_pre)
+# Collect post-upgrade state
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_POST | Get virtual server status"
@@ -118,6 +118,40 @@
   no_log: true
 
 # -----------------------------------------------------------------------------
+# Normalise response values - same pattern as snapshot_pre
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Normalise - software version"
+  ansible.builtin.set_fact:
+    snap_post_version_str: >-
+      {{ snap_post_version.json.get('entries', {})
+         .get('https://localhost/mgmt/tm/sys/version/0', {})
+         .get('nestedStats', {})
+         .get('entries', {})
+         .get('Version', {})
+         .get('description', 'unknown') }}
+
+- name: "SNAPSHOT_POST | Normalise - HA failover state"
+  ansible.builtin.set_fact:
+    snap_post_failover_state: >-
+      {{ 'active' if snap_post_failover.json.get('apiRawValues', {})
+         .get('apiAnonymous', '') | lower is search('active')
+         else 'standby' }}
+
+- name: "SNAPSHOT_POST | Normalise - config sync state"
+  ansible.builtin.set_fact:
+    snap_post_sync_state: >-
+      {%- set ns_state = snap_post_sync.json.get('entries', {})
+           .get('https://localhost/mgmt/tm/cm/sync-status/0', {})
+           .get('nestedStats', {})
+           .get('entries', {})
+           .get('status', {})
+           .get('description', '') -%}
+      {%- set raw_state = snap_post_sync.json.get('apiRawValues', {})
+           .get('apiAnonymous', '') -%}
+      {{ ns_state if ns_state | length > 0 else raw_state | trim | default('unknown') }}
+
+# -----------------------------------------------------------------------------
 # Write post-snapshot JSON
 # -----------------------------------------------------------------------------
 
@@ -133,21 +167,9 @@
         management_ip: "{{ ansible_host }}"
         phase: post
         timestamp: "{{ snapshot_timestamp }}"
-        version: >-
-          {{ snap_post_version.json.entries
-             ['https://localhost/mgmt/tm/sys/version/0']
-             .nestedStats.entries.Version.description
-             | default('unknown') }}
-        ha_failover_state: >-
-          {{ snap_post_failover.json.entries
-             ['https://localhost/mgmt/tm/sys/failover/0']
-             .nestedStats.entries.status.description
-             | default('unknown') }}
-        sync_state: >-
-          {{ snap_post_sync.json.entries
-             ['https://localhost/mgmt/tm/cm/sync-status/0']
-             .nestedStats.entries.status.description
-             | default('unknown') }}
+        version: "{{ snap_post_version_str }}"
+        ha_failover_state: "{{ snap_post_failover_state }}"
+        sync_state: "{{ snap_post_sync_state }}"
       virtual_servers: "{{ snap_post_vs.json.entries | default({}) }}"
       pools: "{{ snap_post_pools.json.entries | default({}) }}"
       routes: "{{ snap_post_routes.json.items | default([]) }}"
@@ -172,17 +194,15 @@
         {%- set vs_name = post_entries[key].nestedStats.entries['tmName'].description | default(key) -%}
         {%- set changed = (pre_avail != post_avail) or (pre_enabled != post_enabled) -%}
         {%- set regressed = (pre_avail == 'available' and post_avail != 'available') -%}
-        {%- if true -%}
-          {%- set _ = results.append({
-            'name': vs_name,
-            'pre_availability': pre_avail,
-            'post_availability': post_avail,
-            'pre_enabled': pre_enabled,
-            'post_enabled': post_enabled,
-            'changed': changed,
-            'regressed': regressed
-          }) -%}
-        {%- endif -%}
+        {%- set _ = results.append({
+          'name': vs_name,
+          'pre_availability': pre_avail,
+          'post_availability': post_avail,
+          'pre_enabled': pre_enabled,
+          'post_enabled': post_enabled,
+          'changed': changed,
+          'regressed': regressed
+        }) -%}
       {%- endfor -%}
       {{ results }}
 
@@ -191,8 +211,6 @@
     diff_routes:
       pre_count: "{{ snapshot_pre_loaded.routes | default([]) | length }}"
       post_count: "{{ snap_post_routes.json.items | default([]) | length }}"
-      pre_names: "{{ snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list }}"
-      post_names: "{{ snap_post_routes.json.items | default([]) | map(attribute='name') | list }}"
       added: "{{ (snap_post_routes.json.items | default([]) | map(attribute='name') | list)
                  | difference(snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list) }}"
       removed: "{{ (snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list)
@@ -202,32 +220,16 @@
   ansible.builtin.set_fact:
     diff_version:
       pre: "{{ snapshot_pre_loaded.metadata.version | default('unknown') }}"
-      post: >-
-        {{ snap_post_version.json.entries
-           ['https://localhost/mgmt/tm/sys/version/0']
-           .nestedStats.entries.Version.description
-           | default('unknown') }}
-      upgraded: >-
-        {{ snapshot_pre_loaded.metadata.version | default('') !=
-           snap_post_version.json.entries
-           ['https://localhost/mgmt/tm/sys/version/0']
-           .nestedStats.entries.Version.description | default('') }}
+      post: "{{ snap_post_version_str }}"
+      upgraded: "{{ snapshot_pre_loaded.metadata.version | default('') != snap_post_version_str }}"
 
 - name: "SNAPSHOT_POST | Compute HA state change"
   ansible.builtin.set_fact:
     diff_ha:
       pre_failover_state: "{{ snapshot_pre_loaded.metadata.ha_failover_state | default('unknown') }}"
-      post_failover_state: >-
-        {{ snap_post_failover.json.entries
-           ['https://localhost/mgmt/tm/sys/failover/0']
-           .nestedStats.entries.status.description
-           | default('unknown') }}
+      post_failover_state: "{{ snap_post_failover_state }}"
       pre_sync_state: "{{ snapshot_pre_loaded.metadata.sync_state | default('unknown') }}"
-      post_sync_state: >-
-        {{ snap_post_sync.json.entries
-           ['https://localhost/mgmt/tm/cm/sync-status/0']
-           .nestedStats.entries.status.description
-           | default('unknown') }}
+      post_sync_state: "{{ snap_post_sync_state }}"
 
 - name: "SNAPSHOT_POST | Compute regression summary"
   ansible.builtin.set_fact:
@@ -237,10 +239,10 @@
       routes_removed_count: "{{ diff_routes.removed | length }}"
       sync_regressed: >-
         {{ snapshot_pre_loaded.metadata.sync_state == 'In Sync'
-           and diff_ha.post_sync_state != 'In Sync' }}
+           and snap_post_sync_state != 'In Sync' }}
 
 # -----------------------------------------------------------------------------
-# Write diff JSON file
+# Write diff JSON
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_POST | Write diff JSON file"
@@ -264,16 +266,16 @@
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
-# Fail play if regressions detected (configurable)
+# Fail if regressions detected
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_POST | Fail if VS regressions detected"
   ansible.builtin.fail:
     msg: >-
-      POST-UPGRADE REGRESSION DETECTED on {{ inventory_hostname }}:
-      {{ diff_regression_summary.vs_regression_count }} virtual server(s) that were
-      available before upgrade are no longer available.
-      See diff file: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json
+      POST-UPGRADE REGRESSION on {{ inventory_hostname }}:
+      {{ diff_regression_summary.vs_regression_count }} VS(es) that were available
+      before upgrade are no longer available.
+      Diff: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json
   when:
     - snapshot_fail_on_regression | bool
     - diff_regression_summary.vs_regression_count | int > 0
@@ -281,9 +283,8 @@
 - name: "SNAPSHOT_POST | Fail if sync state regressed"
   ansible.builtin.fail:
     msg: >-
-      POST-UPGRADE REGRESSION DETECTED on {{ inventory_hostname }}:
-      Config sync was 'In Sync' before upgrade but is now '{{ diff_ha.post_sync_state }}'.
-      Investigate before proceeding.
+      POST-UPGRADE REGRESSION on {{ inventory_hostname }}:
+      Sync was 'In Sync' before upgrade but is now '{{ snap_post_sync_state }}'.
   when:
     - snapshot_fail_on_regression | bool
     - diff_regression_summary.sync_regressed | bool

@@ -3,12 +3,18 @@
 # snapshot_pre - Collect baseline state before upgrade
 # =============================================================================
 # Captures: virtual server status, pool member health, route table,
-#           ARP table, running config hash, UCS backup, software version,
-#           HA sync state
+#           ARP table, software version, HA failover state, sync state
 # Output: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
+#
+# Response format notes (varies by BIG-IP version):
+#   /mgmt/tm/sys/failover/stats  -> apiRawValues.apiAnonymous plain text string
+#   /mgmt/tm/cm/sync-status/stats -> nestedStats on most versions, apiRawValues on some
+#   /mgmt/tm/sys/version         -> nestedStats consistently across versions
+#   /mgmt/tm/ltm/virtual/stats   -> nestedStats per-VS entries
+#   /mgmt/tm/ltm/pool/stats      -> nestedStats per-pool entries
 # =============================================================================
 
-- name: "SNAPSHOT_PRE | Ensure snapshot output directory exists on controller"
+- name: "SNAPSHOT_PRE | Ensure snapshot output directory exists on EE"
   ansible.builtin.file:
     path: "{{ snapshot_output_dir }}"
     state: directory
@@ -17,7 +23,7 @@
   run_once: false
 
 # -----------------------------------------------------------------------------
-# Collect data via iControl REST - all delegated to localhost
+# Collect raw data via iControl REST
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_PRE | Get virtual server status"
@@ -112,7 +118,46 @@
   no_log: true
 
 # -----------------------------------------------------------------------------
-# Save UCS backup on device
+# Normalise response values
+# Each REST endpoint may return nestedStats.entries OR apiRawValues.apiAnonymous
+# depending on BIG-IP version. Normalise here into plain string facts so
+# the rest of the role never needs to care about the raw structure.
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Normalise - software version"
+  ansible.builtin.set_fact:
+    snap_version_str: >-
+      {{ snap_version.json.get('entries', {})
+         .get('https://localhost/mgmt/tm/sys/version/0', {})
+         .get('nestedStats', {})
+         .get('entries', {})
+         .get('Version', {})
+         .get('description', 'unknown') }}
+
+- name: "SNAPSHOT_PRE | Normalise - HA failover state"
+  # failover/stats returns apiRawValues.apiAnonymous: "Failover active for 0d 03:25:49"
+  # Parse 'active' or 'standby' out of the plain text string.
+  ansible.builtin.set_fact:
+    snap_failover_state: >-
+      {{ 'active' if snap_failover.json.get('apiRawValues', {})
+         .get('apiAnonymous', '') | lower is search('active')
+         else 'standby' }}
+
+- name: "SNAPSHOT_PRE | Normalise - config sync state"
+  ansible.builtin.set_fact:
+    snap_sync_state: >-
+      {%- set ns_state = snap_sync.json.get('entries', {})
+           .get('https://localhost/mgmt/tm/cm/sync-status/0', {})
+           .get('nestedStats', {})
+           .get('entries', {})
+           .get('status', {})
+           .get('description', '') -%}
+      {%- set raw_state = snap_sync.json.get('apiRawValues', {})
+           .get('apiAnonymous', '') -%}
+      {{ ns_state if ns_state | length > 0 else raw_state | trim | default('unknown') }}
+
+# -----------------------------------------------------------------------------
+# Save UCS backup on device (stored locally on BIG-IP for later fetch)
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_PRE | Save UCS backup on device"
@@ -134,36 +179,7 @@
   when: bigip_snapshot_save_ucs | bool
 
 # -----------------------------------------------------------------------------
-# Build normalised virtual server summary
-# (extract just name + availability + enabled state from the stats blob)
-# -----------------------------------------------------------------------------
-
-- name: "SNAPSHOT_PRE | Build virtual server summary"
-  ansible.builtin.set_fact:
-    snap_vs_summary: >-
-      {{ snap_virtual_servers.json.entries
-         | default({})
-         | dict2items
-         | map(attribute='value')
-         | map(attribute='nestedStats')
-         | map(attribute='entries')
-         | map('dict2items')
-         | map('items2dict', key_name='key', value_name='value')
-         | list }}
-
-- name: "SNAPSHOT_PRE | Build pool member summary"
-  ansible.builtin.set_fact:
-    snap_pool_summary: >-
-      {{ snap_pools.json.entries
-         | default({})
-         | dict2items
-         | map(attribute='value')
-         | map(attribute='nestedStats')
-         | map(attribute='entries')
-         | list }}
-
-# -----------------------------------------------------------------------------
-# Write pre-snapshot JSON to controller
+# Write pre-snapshot JSON
 # -----------------------------------------------------------------------------
 
 - name: "SNAPSHOT_PRE | Write pre-snapshot JSON file"
@@ -178,21 +194,9 @@
         management_ip: "{{ ansible_host }}"
         phase: pre
         timestamp: "{{ snapshot_timestamp }}"
-        version: >-
-          {{ snap_version.json.entries
-             ['https://localhost/mgmt/tm/sys/version/0']
-             .nestedStats.entries.Version.description
-             | default('unknown') }}
-        ha_failover_state: >-
-          {{ snap_failover.json.entries
-             ['https://localhost/mgmt/tm/sys/failover/0']
-             .nestedStats.entries.status.description
-             | default('unknown') }}
-        sync_state: >-
-          {{ snap_sync.json.entries
-             ['https://localhost/mgmt/tm/cm/sync-status/0']
-             .nestedStats.entries.status.description
-             | default('unknown') }}
+        version: "{{ snap_version_str }}"
+        ha_failover_state: "{{ snap_failover_state }}"
+        sync_state: "{{ snap_sync_state }}"
         ucs_saved: "{{ bigip_snapshot_save_ucs | bool }}"
         ucs_name: >-
           {{ 'pre_upgrade_' + inventory_hostname + '_' + snapshot_timestamp
@@ -206,17 +210,8 @@
 - name: "SNAPSHOT_PRE | Summary"
   ansible.builtin.debug:
     msg: >-
-      Pre-snapshot complete for {{ inventory_hostname }}.
-      Version: {{ snap_version.json.entries
-                  ['https://localhost/mgmt/tm/sys/version/0']
-                  .nestedStats.entries.Version.description
-                  | default('unknown') }} |
-      HA state: {{ snap_failover.json.entries
-                   ['https://localhost/mgmt/tm/sys/failover/0']
-                   .nestedStats.entries.status.description
-                   | default('unknown') }} |
-      Sync: {{ snap_sync.json.entries
-               ['https://localhost/mgmt/tm/cm/sync-status/0']
-               .nestedStats.entries.status.description
-               | default('unknown') }} |
+      Pre-snapshot complete for {{ inventory_hostname }} |
+      Version: {{ snap_version_str }} |
+      HA state: {{ snap_failover_state }} |
+      Sync: {{ snap_sync_state }} |
       File: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json

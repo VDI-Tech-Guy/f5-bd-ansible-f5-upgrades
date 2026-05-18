@@ -66,14 +66,16 @@
         status_code: 200
       register: preflight_failover_query
       delegate_to: localhost
-      # no_log: true
+      no_log: true
 
     - name: "PREFLIGHT | Set ha_role fact from live device state"
+      # BIG-IP returns failover state in apiRawValues.apiAnonymous as a plain
+      # text string: "Failover active for 0d 03:25:49" or "Failover standby"
+      # We search for the word 'active' in that string to determine the role.
       ansible.builtin.set_fact:
         ha_role: >-
-          {{ 'active' if preflight_failover_query.json.entries
-             ['https://localhost/mgmt/tm/sys/failover/0']
-             .nestedStats.entries.status.description == 'active'
+          {{ 'active' if preflight_failover_query.json.apiRawValues.apiAnonymous
+             | default('') | lower is search('active')
              else 'standby' }}
         cacheable: true
 
@@ -91,12 +93,19 @@
       no_log: true
 
     - name: "PREFLIGHT | Set sync state fact"
+      # sync-status/stats uses nestedStats on most versions.
+      # Fall back to apiRawValues.apiAnonymous if nestedStats is absent.
       ansible.builtin.set_fact:
         bigip_sync_state: >-
-          {{ preflight_sync_query.json.entries
-             ['https://localhost/mgmt/tm/cm/sync-status/0']
-             .nestedStats.entries.status.description
-             | default('unknown') }}
+          {%- set ns_state = preflight_sync_query.json.get('entries', {})
+               .get('https://localhost/mgmt/tm/cm/sync-status/0', {})
+               .get('nestedStats', {})
+               .get('entries', {})
+               .get('status', {})
+               .get('description', '') -%}
+          {%- set raw_state = preflight_sync_query.json.get('apiRawValues', {})
+               .get('apiAnonymous', '') -%}
+          {{ ns_state if ns_state | length > 0 else raw_state | trim | default('unknown') }}
         cacheable: true
 
     - name: "PREFLIGHT | Abort if pair is not In Sync"
@@ -127,14 +136,22 @@
         backup_date: "{{ _backup_date }}"
         cacheable: true
 
+    - name: "PREFLIGHT | Parse version from query response"
+      ansible.builtin.set_fact:
+        bigip_current_version: >-
+          {{ preflight_version_query.json.get('entries', {})
+             .get('https://localhost/mgmt/tm/sys/version/0', {})
+             .get('nestedStats', {})
+             .get('entries', {})
+             .get('Version', {})
+             .get('description', 'unknown') }}
+
     - name: "PREFLIGHT | Summary"
       ansible.builtin.debug:
         msg: >-
           {{ inventory_hostname }} ({{ ansible_host }}) |
           HA role: {{ ha_role }} |
-          Version: {{ preflight_version_query.json.entries
-                      ['https://localhost/mgmt/tm/sys/version/0']
-                      .nestedStats.entries.Version.description | default('unknown') }} |
+          Version: {{ bigip_current_version }} |
           Target: {{ bigip_target_version }} |
           Sync: {{ bigip_sync_state }} |
           Timestamp: {{ snapshot_timestamp }}
@@ -255,9 +272,8 @@
     - name: "FAILOVER | Display new state"
       ansible.builtin.debug:
         msg: >-
-          {{ inventory_hostname }} post-failover state: {{ post_failover_state.json.entries
-             ['https://localhost/mgmt/tm/sys/failover/0']
-             .nestedStats.entries.status.description | default('unknown') }}
+          {{ inventory_hostname }} post-failover state: {{ post_failover_state.json.apiRawValues.apiAnonymous
+             | default('unknown') | trim }}
       when: not bigip_upgrade_dry_run | default(false) | bool
   tags: [upgrade, failover]
 

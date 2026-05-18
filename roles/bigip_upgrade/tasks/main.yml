@@ -27,9 +27,12 @@
 - name: "UPGRADE | Set current version fact"
   ansible.builtin.set_fact:
     bigip_current_version: >-
-      {{ bigip_current_version_check.json.entries
-         ['https://localhost/mgmt/tm/sys/version/0']
-         .nestedStats.entries.Version.description }}
+      {{ bigip_current_version_check.json.get('entries', {})
+         .get('https://localhost/mgmt/tm/sys/version/0', {})
+         .get('nestedStats', {})
+         .get('entries', {})
+         .get('Version', {})
+         .get('description', 'unknown') }}
 
 - name: "UPGRADE | Display current version"
   ansible.builtin.debug:
