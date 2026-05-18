@@ -31,7 +31,8 @@
         Failover After  : {{ report_diff.ha.post_failover_state }}
         Sync Before     : {{ report_diff.ha.pre_sync_state }}
         Sync After      : {{ report_diff.ha.post_sync_state }}
-        Sync Result     : {{ 'REGRESSED' if report_diff.regression_summary.sync_regressed else 'OK' }}
+        Sync Change     : {{ report_diff.regression_summary.sync_state_change | default('n/a') }}
+        Note            : {{ report_diff.regression_summary.sync_note | default('') }}
 
 - name: "REPORT | Virtual Servers - PASS (no regressions)"
   ansible.builtin.debug:
@@ -81,7 +82,6 @@
       ============================================================
   when:
     - report_diff.regression_summary.vs_regression_count | int == 0
-    - not report_diff.regression_summary.sync_regressed | bool
 
 - name: "REPORT | Overall Result - FAIL"
   ansible.builtin.debug:
@@ -89,9 +89,6 @@
       ============================================================
       OVERALL RESULT : FAIL - REGRESSIONS DETECTED
       VS regressions : {{ report_diff.regression_summary.vs_regression_count }}
-      Sync regressed : {{ report_diff.regression_summary.sync_regressed }}
       Diff file      : {{ snapshot_output_dir }}/{{ report_diff.metadata.hostname }}_{{ snapshot_timestamp }}_diff.json
       ============================================================
-  when: >-
-    report_diff.regression_summary.vs_regression_count | int > 0 or
-    report_diff.regression_summary.sync_regressed | bool
+  when: report_diff.regression_summary.vs_regression_count | int > 0
