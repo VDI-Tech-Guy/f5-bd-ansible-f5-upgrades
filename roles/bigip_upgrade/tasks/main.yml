@@ -4,12 +4,15 @@
 # =============================================================================
 # Image is already on BIG-IP /shared/images/ verified by bastion_image_push.
 #
-# Two step approach per F5 documentation:
-#   Step 1: state=installed  - installs image to volume, blocks until complete
-#   Step 2: state=activated  - reboots into new volume, connection drops here
+# Single module call with state=activated:
+#   - Installs image to volume
+#   - Waits for installation to complete
+#   - Activates (reboots into) the new volume
 #
-# The connection drop on activation is expected and handled by ignore_errors.
-# bigip_wait role then polls until the device is back online.
+# timeout: 3600 gives the module up to 1 hour to complete install + activate.
+# Connection drops during reboot - caught by failed_when checking for
+# connection-related errors only. bigip_wait handles the rest.
+# =============================================================================
 
 # -----------------------------------------------------------------------------
 # Pre-flight - version check
@@ -56,8 +59,10 @@
   when: bigip_current_version is defined and bigip_target_version in bigip_current_version
 
 # -----------------------------------------------------------------------------
-# Step 1 - Install image to volume
-# Module blocks until installation is fully complete before returning.
+# Single module call - install and activate
+# state=activated handles: install -> wait for complete -> reboot
+# timeout=3600 gives up to 1 hour for install + activation
+# Connection drops on reboot - caught by failed_when
 # -----------------------------------------------------------------------------
 
 - name: "UPGRADE | Dry-run mode - skipping install and reboot"
@@ -65,34 +70,13 @@
     msg: "DRY RUN: Would install {{ bigip_image_filename }} to {{ bigip_install_volume }} on {{ ansible_host }}"
   when: bigip_upgrade_dry_run | bool
 
-- name: "UPGRADE | Step 1 - Install image to volume {{ bigip_install_volume }}"
-  f5networks.f5_bigip.bigip_software_install:
-    image: "{{ bigip_image_filename }}"
-    state: installed
-    volume: "{{ bigip_install_volume }}"
-  register: bigip_install_result
-  when: not bigip_upgrade_dry_run | bool
-
-- name: "UPGRADE | Step 1 complete - image installed to {{ bigip_install_volume }}"
-  ansible.builtin.debug:
-    msg: "Image installed successfully to {{ bigip_install_volume }} on {{ ansible_host }}"
-  when: not bigip_upgrade_dry_run | bool
-
-# -----------------------------------------------------------------------------
-# Step 2 - Activate (reboot into new volume)
-# Connection drops immediately on activation - this is expected.
-# ignore_errors catches the connection reset, not real failures.
-# bigip_wait role handles waiting for the device to come back.
-# -----------------------------------------------------------------------------
-
-- name: "UPGRADE | Step 2 - Activate volume {{ bigip_install_volume }} (reboot)"
+- name: "UPGRADE | Install and activate image (state=activated)"
   f5networks.f5_bigip.bigip_software_install:
     image: "{{ bigip_image_filename }}"
     state: activated
     volume: "{{ bigip_install_volume }}"
+    timeout: 3600
   register: bigip_activate_result
-  # Only ignore connection drop errors - these are expected when BIG-IP reboots.
-  # Real failures (400, 401, 500 etc) will still halt the play.
   failed_when:
     - bigip_activate_result is failed
     - >-
@@ -101,6 +85,7 @@
       and 'reset' not in (bigip_activate_result.msg | default(''))
       and 'closed' not in (bigip_activate_result.msg | default(''))
       and 'timed out' not in (bigip_activate_result.msg | default(''))
+      and 'timeout' not in (bigip_activate_result.msg | default(''))
   when:
     - not bigip_upgrade_dry_run | bool
     - bigip_reboot_after_install | bool
@@ -113,7 +98,8 @@
          'connection' in (bigip_activate_result.msg | default('')) or
          'reset' in (bigip_activate_result.msg | default('')) or
          'closed' in (bigip_activate_result.msg | default('')) or
-         'timed out' in (bigip_activate_result.msg | default('')) }}
+         'timed out' in (bigip_activate_result.msg | default('')) or
+         'timeout' in (bigip_activate_result.msg | default('')) }}
     cacheable: true
   when:
     - not bigip_upgrade_dry_run | bool
