@@ -163,6 +163,7 @@
     name: "pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}"
     state: present
   register: snap_ucs_save
+  delegate_to: localhost
   when: bigip_snapshot_save_ucs | bool
 
 # -----------------------------------------------------------------------------

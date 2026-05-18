@@ -90,6 +90,7 @@
     create_on_missing: true
     fail_on_missing: false
   register: ucs_fetch_result
+  delegate_to: localhost
   when: bigip_snapshot_save_ucs | default(true) | bool
 
 - name: "BASTION_STORAGE | UCS fetched to EE"
