@@ -42,6 +42,12 @@
         msg: "changed={{ call1_result.changed }} | message={{ call1_result.message | default('none') }} | volume_uri={{ call1_result.volume_uri | default('none') }}"
       when: not bigip_skip_install | bool
 
+    # -------------------------------------------------------------------------
+    # Poll volume status via URI - no persistent socket needed
+    # URI uses a fresh HTTP connection each time via delegate_to: localhost
+    # This tells us the real install status regardless of socket state
+    # -------------------------------------------------------------------------
+
     - name: "TEST | Pause 10s before first poll"
       ansible.builtin.pause:
         seconds: 10
@@ -78,12 +84,14 @@
         msg: >-
           {%- if volume_poll.json.status | default('') == 'complete' %}
           RESULT: Volume install complete - ready for activation/reboot
-          {%- elif volume_poll.json.status | default('') in ['installing', 'testing archives'] %}
-          RESULT: Still installing - status={{ volume_poll.json.status }}
+          {%- elif 'installing' in (volume_poll.json.status | default('') | lower) %}
+          RESULT: Still installing - {{ volume_poll.json.status }} - URI polling confirmed working
+          {%- elif 'restarting' in (volume_poll.json.status | default('') | lower) %}
+          RESULT: Device restarting services - reboot in progress
           {%- elif volume_poll.status | default(0) != 200 %}
           RESULT: Could not reach BIG-IP - device may be rebooting
           {%- else %}
           RESULT: Unknown status={{ volume_poll.json.status | default('none') }}
           {%- endif %}
-          URI polling works without persistent socket - consider replacing
-          module volume_uri polling with URI polling in production code.
+          URI polling confirmed working - module volume_uri polling is broken (socket dies after activation).
+          Ticket should be raised against f5networks.f5_bigip for socket reconnection issue.
