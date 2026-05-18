@@ -115,7 +115,7 @@
     - not bigip_upgrade_dry_run | bool
     - bigip_reboot_after_install | bool
     - bigip_activate_task.volume_uri is defined
-  ignore_errors: true
+  failed_when: false
   retries: 10
   delay: 30
   until: >-
@@ -158,7 +158,10 @@
     - bigip_activate_task.volume_uri is defined
     - bigip_install_progress.message is defined
     - "'restarting services' in bigip_install_progress.message"
-  ignore_errors: true
+  failed_when: false
+  retries: 10
+  delay: 30
+  until: bigip_install_final is not failed
 
 # -----------------------------------------------------------------------------
 # Set reboot_triggered - always true after activation unless dry run
