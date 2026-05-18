@@ -1,0 +1,82 @@
+---
+# =============================================================================
+# TEST PLAYBOOK - Isolate bigip_software_install volume_uri socket issue
+# =============================================================================
+# IMPORTANT: target_host is REQUIRED and must be a single host - never run
+# this against both HA nodes simultaneously as it will trigger two installs.
+#
+# Usage - full test (triggers install):
+#   ansible-playbook playbooks/BIG-IP/Tests/test_software_install.yaml \
+#     -i inventory/hosts.ini \
+#     -e "target_host=Demo-16x-Node2 bigip_image_filename=BIGIP-17.5.1.5-0.0.6.iso bigip_install_volume=HD1.2"
+#
+# Usage - skip install, test polling only (install already triggered):
+#   ansible-playbook playbooks/BIG-IP/Tests/test_software_install.yaml \
+#     -i inventory/hosts.ini \
+#     -e "target_host=Demo-16x-Node2 bigip_skip_install=true bigip_test_volume_uri=/mgmt/tm/sys/software/volume/HD1.2"
+#
+# AAP: Set Job Template Limit and Extra Variables to "Prompt on launch"
+#      to prevent accidental multi-host runs.
+#
+# target_host           - REQUIRED - single inventory hostname to test against
+# bigip_skip_install    - true = skip install, poll only (default: false)
+# bigip_test_volume_uri - volume_uri to poll when skipping install
+# =============================================================================
+
+- name: "TEST - bigip_software_install volume_uri socket isolation"
+  hosts: "{{ target_host | mandatory }}"
+  gather_facts: false
+  vars:
+    bigip_skip_install: false
+    bigip_test_volume_uri: "/mgmt/tm/sys/software/volume/{{ bigip_install_volume | default('HD1.2') }}"
+  tasks:
+
+    - name: "TEST | SKIPPING Call 1 - install already triggered"
+      ansible.builtin.debug:
+        msg: >-
+          Skipping install - polling only.
+          Using volume_uri: {{ bigip_test_volume_uri }}
+      when: bigip_skip_install | bool
+
+    - name: "TEST | Call 1 - state=activated (starts install)"
+      f5networks.f5_bigip.bigip_software_install:
+        image: "{{ bigip_image_filename }}"
+        state: activated
+        volume: "{{ bigip_install_volume }}"
+      register: call1_result
+      when: not bigip_skip_install | bool
+
+    - name: "TEST | Call 1 result"
+      ansible.builtin.debug:
+        msg:
+          changed: "{{ call1_result.changed }}"
+          message: "{{ call1_result.message | default('none') }}"
+          volume_uri: "{{ call1_result.volume_uri | default('none') }}"
+      when: not bigip_skip_install | bool
+
+    - name: "TEST | Set volume_uri to use for polling"
+      ansible.builtin.set_fact:
+        test_volume_uri: >-
+          {{ call1_result.volume_uri
+             if not bigip_skip_install | bool
+             else bigip_test_volume_uri }}
+
+    - name: "TEST | Volume URI for polling"
+      ansible.builtin.debug:
+        msg: "Polling volume_uri: {{ test_volume_uri }}"
+
+    - name: "TEST | Pause 10s before first poll"
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: "TEST | Call 2 - volume_uri poll (no reset, immediate)"
+      f5networks.f5_bigip.bigip_software_install:
+        volume_uri: "{{ test_volume_uri }}"
+        timeout: 60
+      register: call2_result
+      failed_when: false
+
+    - name: "TEST | Call 2 result"
+      ansible.builtin.debug:
+        msg:
+          failed: "{{ call2_result
