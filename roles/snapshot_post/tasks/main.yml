@@ -210,9 +210,9 @@
       pre_count: "{{ snapshot_pre_loaded.routes | default([]) | length }}"
       post_count: "{{ snap_post_routes.json['items'] | default([]) | length }}"
       added: "{{ (snap_post_routes.json['items'] | default([]) | map(attribute='name') | list)
-                   | difference(snap_post_routes.json['items'] | default([]) | map(attribute='name') | list) }}"
+                 | difference(snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list) }}"
       removed: "{{ (snapshot_pre_loaded.routes | default([]) | map(attribute='name') | list)
-                   | difference(snap_post_routes.json.items | default([]) | map(attribute='name') | list) }}"
+                   | difference(snap_post_routes.json['items'] | default([]) | map(attribute='name') | list) }}"
 
 - name: "SNAPSHOT_POST | Compute version change"
   ansible.builtin.set_fact:
