@@ -61,9 +61,8 @@
   ansible.builtin.set_fact:
     snap_post_all_virtual_servers: >-
       {{ snap_post_per_partition.results
-         | selectattr('ansible_facts', 'defined')
-         | map(attribute='ansible_facts')
-         | map(attribute='virtual_servers', default=[])
+         | selectattr('virtual_servers', 'defined')
+         | map(attribute='virtual_servers')
          | flatten }}
   when: snap_post_partition_names | length > 0
 
@@ -71,11 +70,45 @@
   ansible.builtin.set_fact:
     snap_post_all_ltm_pools: >-
       {{ snap_post_per_partition.results
-         | selectattr('ansible_facts', 'defined')
-         | map(attribute='ansible_facts')
-         | map(attribute='ltm_pools', default=[])
+         | selectattr('ltm_pools', 'defined')
+         | map(attribute='ltm_pools')
          | flatten }}
   when: snap_post_partition_names | length > 0
+
+- name: "SNAPSHOT_POST | Collect AS3 declarations across all partitions"
+  ansible.builtin.set_fact:
+    snap_post_all_as3_declarations: >-
+      {{ snap_post_per_partition.results
+         | selectattr('ansible_facts', 'defined')
+         | selectattr('ansible_facts.ansible_net_as3_config', 'defined')
+         | map(attribute='ansible_facts')
+         | map(attribute='ansible_net_as3_config')
+         | selectattr('declaration', 'defined')
+         | list }}
+  when: snap_post_partition_names | length > 0
+
+- name: "SNAPSHOT_POST | Write AS3 declarations snapshot file"
+  ansible.builtin.copy:
+    dest: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post_as3.json"
+    content: "{{ as3_snapshot_data | to_nice_json }}"
+    mode: '0644'
+  vars:
+    as3_snapshot_data:
+      metadata:
+        hostname: "{{ inventory_hostname }}"
+        management_ip: "{{ ansible_host }}"
+        phase: post
+        timestamp: "{{ snapshot_timestamp }}"
+        tenant_count: "{{ snap_post_all_as3_declarations | default([]) | length }}"
+        note: >-
+          AS3 declarations represent desired/declared state only.
+          One entry per AS3 tenant/partition.
+          For operational status (up/down) see the post.json snapshot.
+      declarations: "{{ snap_post_all_as3_declarations | default([]) }}"
+  delegate_to: localhost
+  when:
+    - snap_post_all_as3_declarations is defined
+    - snap_post_all_as3_declarations | length > 0
 
 - name: "SNAPSHOT_POST | Fallback - empty VS and pool lists if no partitions"
   ansible.builtin.set_fact:

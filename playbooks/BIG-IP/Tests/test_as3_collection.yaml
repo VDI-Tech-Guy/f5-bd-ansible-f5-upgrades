@@ -1,0 +1,121 @@
+---
+# =============================================================================
+# TEST PLAYBOOK - Validate AS3 declaration collection methods
+# =============================================================================
+# Tests two approaches for collecting AS3 declarations:
+#   Method 1: bigip_device_info gather_subset: as3 from Common partition
+#   Method 2: bigip_device_info gather_subset: as3 per partition (loop)
+#
+# Run against a single host with AS3 deployed tenants to validate which
+# method correctly returns all tenant declarations.
+#
+# Usage:
+#   ansible-playbook playbooks/BIG-IP/Tests/test_as3_collection.yaml \
+#     -i inventory/hosts.ini \
+#     -e "target_host=Demo-16x-Node1"
+#
+# AAP: Set Job Template Limit and Extra Variables to "Prompt on launch"
+# =============================================================================
+
+- name: "TEST - AS3 declaration collection method validation"
+  hosts: "{{ target_host | mandatory }}"
+  gather_facts: false
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # First - get partition list so we can loop in Method 2
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Get partition list"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - partitions
+      register: test_partitions
+
+    - name: "TEST | Show partitions found"
+      ansible.builtin.debug:
+        msg: "Partitions: {{ test_partitions.partitions | map(attribute='name') | list }}"
+
+    # -------------------------------------------------------------------------
+    # Method 1 - gather_subset: as3 from Common partition only
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Method 1 - bigip_device_info as3 from Common partition"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - as3
+        partition: Common
+      register: test_as3_common
+      ignore_errors: true
+
+    - name: "TEST | Method 1 result"
+      ansible.builtin.debug:
+        msg: >-
+          Method 1 (Common partition):
+          failed={{ test_as3_common is failed }}
+          has_as3_config={{ test_as3_common.ansible_facts.ansible_net_as3_config is defined }}
+          declaration_keys={{ test_as3_common.ansible_facts.ansible_net_as3_config.declaration.keys() | list
+                              if test_as3_common.ansible_facts.ansible_net_as3_config is defined
+                              and test_as3_common.ansible_facts.ansible_net_as3_config.declaration is defined
+                              else 'none' }}
+
+    # -------------------------------------------------------------------------
+    # Method 2 - gather_subset: as3 per partition (loop)
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Method 2 - bigip_device_info as3 per partition"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - as3
+        partition: "{{ item }}"
+      register: test_as3_per_partition
+      loop: "{{ test_partitions.partitions | map(attribute='name') | list }}"
+      ignore_errors: true
+
+    - name: "TEST | Method 2 result per partition"
+      ansible.builtin.debug:
+        msg: >-
+          Method 2 partition={{ item.item }}
+          failed={{ item is failed }}
+          has_as3_config={{ item.ansible_facts.ansible_net_as3_config is defined
+                           if item.ansible_facts is defined else false }}
+          declaration_keys={{ item.ansible_facts.ansible_net_as3_config.declaration.keys() | list
+                              if item.ansible_facts is defined
+                              and item.ansible_facts.ansible_net_as3_config is defined
+                              and item.ansible_facts.ansible_net_as3_config.declaration is defined
+                              else 'none' }}
+      loop: "{{ test_as3_per_partition.results }}"
+
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Summary"
+      ansible.builtin.debug:
+        msg: >-
+          ============================================================
+          AS3 COLLECTION TEST SUMMARY
+          ------------------------------------------------------------
+          Method 1 (Common only):
+            Tenants found: {{ test_as3_common.ansible_facts.ansible_net_as3_config.declaration.keys()
+                              | list
+                              | reject('equalto', 'class')
+                              | reject('equalto', 'schemaVersion')
+                              | reject('equalto', 'id')
+                              | reject('equalto', 'label')
+                              | reject('equalto', 'remark')
+                              | reject('equalto', 'updateMode')
+                              | reject('equalto', 'controls')
+                              | list
+                              if test_as3_common.ansible_facts is defined
+                              and test_as3_common.ansible_facts.ansible_net_as3_config is defined
+                              else [] }}
+
+          Method 2 (per partition):
+            Partitions with AS3: {{ test_as3_per_partition.results
+                                    | selectattr('ansible_facts', 'defined')
+                                    | selectattr('ansible_facts.ansible_net_as3_config', 'defined')
+                                    | map(attribute='item')
+                                    | list }}
+          ============================================================
+          Use whichever method returns all tenants correctly.

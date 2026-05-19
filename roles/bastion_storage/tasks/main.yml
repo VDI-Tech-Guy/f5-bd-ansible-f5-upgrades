@@ -69,6 +69,40 @@
     ansible_connection: ssh
   become: true
 
+- name: "BASTION_STORAGE | Check if pre AS3 snapshot exists on EE"
+  ansible.builtin.stat:
+    path: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_as3.json"
+  register: pre_as3_stat
+  delegate_to: localhost
+
+- name: "BASTION_STORAGE | Copy pre AS3 declarations to bastion"
+  ansible.builtin.copy:
+    src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_as3.json"
+    dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_as3.json"
+    mode: '0644'
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
+  become: true
+  when: pre_as3_stat.stat.exists
+
+- name: "BASTION_STORAGE | Check if post AS3 snapshot exists on EE"
+  ansible.builtin.stat:
+    path: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post_as3.json"
+  register: post_as3_stat
+  delegate_to: localhost
+
+- name: "BASTION_STORAGE | Copy post AS3 declarations to bastion"
+  ansible.builtin.copy:
+    src: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post_as3.json"
+    dest: "{{ bastion_device_backup_path }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_post_as3.json"
+    mode: '0644'
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
+  become: true
+  when: post_as3_stat.stat.exists
+
 # -----------------------------------------------------------------------------
 # Step 3 - UCS is already on the EE - downloaded by snapshot_pre role
 # snapshot_pre runs bigip_ucs_fetch which saves + downloads in one step.
