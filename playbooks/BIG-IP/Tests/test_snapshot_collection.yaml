@@ -132,7 +132,7 @@
 
     - name: "TEST | Routes and ARP result"
       ansible.builtin.debug:
-        msg: "Route lines: {{ test_routes.stdout_lines | default([]) | length }} | ARP lines: {{ test_arp.stdout_lines | default([]) | length }}"
+        msg: "Route lines: {{ test_routes.stdout_lines[0] | default([]) | length }} | ARP lines: {{ test_arp.stdout_lines[0] | default([]) | length }}"
 
     - name: "TEST | HA failover state via uri"
       ansible.builtin.uri:
@@ -167,8 +167,8 @@
           virtual_servers: "{{ test_all_vs }}"
           ltm_pools: "{{ test_all_pools }}"
           as3_declaration: "{{ test_as3_info.ansible_facts.ansible_net_as3_config | default({}) }}"
-          routes: "{{ test_routes.stdout_lines | default([]) }}"
-          arp: "{{ test_arp.stdout_lines | default([]) }}"
+          routes: "{{ test_routes.stdout_lines[0] | default([]) }}"
+          arp: "{{ test_arp.stdout_lines[0] | default([]) }}"
       delegate_to: localhost
 
     - name: "TEST | Final Summary"
@@ -182,7 +182,7 @@
           Virtual Servers : {{ test_all_vs | length }}
           LTM Pools       : {{ test_all_pools | length }}
           AS3 present     : {{ test_as3_has_config | default(false) }}
-          Route lines     : {{ test_routes.stdout_lines | default([]) | length }}
-          ARP lines       : {{ test_arp.stdout_lines | default([]) | length }}
+          Route lines     : {{ test_routes.stdout_lines[0] | default([]) | length }}
+          ARP lines       : {{ test_arp.stdout_lines[0] | default([]) | length }}
           Output file     : {{ test_output_dir }}/{{ inventory_hostname }}_{{ test_timestamp }}_test_snapshot.json
           ============================================================
