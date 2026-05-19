@@ -104,7 +104,7 @@
     - snap_as3_info is not failed
     - snap_as3_info.ansible_facts is defined
     - snap_as3_info.ansible_facts.ansible_net_as3_config is defined
-    - snap_all_as3_declarations | length > 0
+    - snap_as3_info | length > 0
 
 - name: "SNAPSHOT_PRE | Fallback - empty VS and pool lists if no partitions"
   ansible.builtin.set_fact:
