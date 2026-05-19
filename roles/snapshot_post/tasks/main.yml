@@ -156,7 +156,7 @@
   when:
     - diff_as3 is defined
     - diff_as3.changed | bool
-    - snap_post_all_as3_declarations | length > 0
+    - diff_as3 | length > 0
 
 - name: "SNAPSHOT_POST | Fallback - empty VS and pool lists if no partitions"
   ansible.builtin.set_fact:
