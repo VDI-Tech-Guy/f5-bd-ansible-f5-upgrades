@@ -98,7 +98,7 @@
           AS3 declarations from /Common - returns all tenants in one call.
           Represents desired/declared state only.
           For operational status see the pre.json snapshot.
-      declaration: "{{ snap_as3_info.ansible_facts.ansible_net_as3_config | default({}) }}"
+      declaration: "{{ snap_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) }}"
   delegate_to: localhost
   when:
     - snap_as3_info is not failed

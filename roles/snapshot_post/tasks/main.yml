@@ -99,7 +99,7 @@
           AS3 declarations from /Common - returns all tenants in one call.
           Represents desired/declared state only.
           For operational status see the post.json snapshot.
-      declaration: "{{ snap_post_as3_info.ansible_facts.ansible_net_as3_config | default({}) }}"
+      declaration: "{{ snap_post_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) }}"
   delegate_to: localhost
   when:
     - snap_post_as3_info is not failed
@@ -130,10 +130,15 @@
   ansible.builtin.set_fact:
     diff_as3:
       pre_declaration: "{{ snap_pre_as3_loaded.declaration | default({}) }}"
-      post_declaration: "{{ snap_post_as3_info.ansible_facts.ansible_net_as3_config | default({}) }}"
+      post_declaration: "{{ snap_post_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) }}"
       changed: >-
-        {{ snap_pre_as3_loaded.declaration | default({}) | to_json !=
-           snap_post_as3_info.ansible_facts.ansible_net_as3_config | default({}) | to_json }}
+        {{ (snap_pre_as3_loaded.declaration | default({}) | dict2items
+            | rejectattr('key', 'equalto', 'controls')
+            | list | items2dict | to_json) !=
+           (snap_post_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) | dict2items
+            | rejectattr('key', 'equalto', 'controls')
+            | list | items2dict | to_json) }}
+      note: "Comparison excludes 'controls' key (archiveTimestamp changes on every AS3 operation)"
   when:
     - pre_as3_stat.stat.exists
     - snap_post_as3_info is not failed
@@ -262,8 +267,8 @@
         {%- set pre = pre_vs | selectattr('full_path', 'equalto', post.full_path) | list | first | default({}) -%}
         {%- set pre_avail = pre.availability_status | default('not_in_pre') -%}
         {%- set post_avail = post.availability_status | default('unknown') -%}
-        {%- set pre_enabled = pre.enabled_status | default('not_in_pre') -%}
-        {%- set post_enabled = post.enabled_status | default('unknown') -%}
+        {%- set pre_enabled = pre.enabled | default('not_in_pre') -%}
+        {%- set post_enabled = post.enabled | default('unknown') -%}
         {%- set changed = (pre_avail != post_avail) or (pre_enabled != post_enabled) -%}
         {%- set regressed = (pre_avail == 'available' and post_avail != 'available') -%}
         {%- set _ = results.append({
