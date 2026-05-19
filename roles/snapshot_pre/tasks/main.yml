@@ -74,17 +74,13 @@
          | flatten }}
   when: snap_partition_names | length > 0
 
-- name: "SNAPSHOT_PRE | Collect AS3 declarations across all partitions"
-  ansible.builtin.set_fact:
-    snap_all_as3_declarations: >-
-      {{ snap_per_partition.results
-         | selectattr('ansible_facts', 'defined')
-         | selectattr('ansible_facts.ansible_net_as3_config', 'defined')
-         | map(attribute='ansible_facts')
-         | map(attribute='ansible_net_as3_config')
-         | selectattr('declaration', 'defined')
-         | list }}
-  when: snap_partition_names | length > 0
+- name: "SNAPSHOT_PRE | Collect AS3 declarations via bigip_device_info (Common returns all tenants)"
+  f5networks.f5_bigip.bigip_device_info:
+    gather_subset:
+      - as3
+    partition: Common
+  register: snap_as3_info
+  ignore_errors: true
 
 - name: "SNAPSHOT_PRE | Write AS3 declarations snapshot file"
   ansible.builtin.copy:
@@ -98,15 +94,16 @@
         management_ip: "{{ ansible_host }}"
         phase: pre
         timestamp: "{{ snapshot_timestamp }}"
-        tenant_count: "{{ snap_all_as3_declarations | default([]) | length }}"
         note: >-
-          AS3 declarations represent desired/declared state only.
-          One entry per AS3 tenant/partition.
-          For operational status (up/down) see the pre.json snapshot.
-      declarations: "{{ snap_all_as3_declarations | default([]) }}"
+          AS3 declarations from /Common - returns all tenants in one call.
+          Represents desired/declared state only.
+          For operational status see the pre.json snapshot.
+      declaration: "{{ snap_as3_info.ansible_facts.ansible_net_as3_config | default({}) }}"
   delegate_to: localhost
   when:
-    - snap_all_as3_declarations is defined
+    - snap_as3_info is not failed
+    - snap_as3_info.ansible_facts is defined
+    - snap_as3_info.ansible_facts.ansible_net_as3_config is defined
     - snap_all_as3_declarations | length > 0
 
 - name: "SNAPSHOT_PRE | Fallback - empty VS and pool lists if no partitions"

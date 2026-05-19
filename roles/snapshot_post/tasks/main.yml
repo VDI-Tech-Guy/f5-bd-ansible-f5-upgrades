@@ -75,17 +75,13 @@
          | flatten }}
   when: snap_post_partition_names | length > 0
 
-- name: "SNAPSHOT_POST | Collect AS3 declarations across all partitions"
-  ansible.builtin.set_fact:
-    snap_post_all_as3_declarations: >-
-      {{ snap_post_per_partition.results
-         | selectattr('ansible_facts', 'defined')
-         | selectattr('ansible_facts.ansible_net_as3_config', 'defined')
-         | map(attribute='ansible_facts')
-         | map(attribute='ansible_net_as3_config')
-         | selectattr('declaration', 'defined')
-         | list }}
-  when: snap_post_partition_names | length > 0
+- name: "SNAPSHOT_POST | Collect AS3 declarations via bigip_device_info (Common returns all tenants)"
+  f5networks.f5_bigip.bigip_device_info:
+    gather_subset:
+      - as3
+    partition: Common
+  register: snap_post_as3_info
+  ignore_errors: true
 
 - name: "SNAPSHOT_POST | Write AS3 declarations snapshot file"
   ansible.builtin.copy:
@@ -99,15 +95,67 @@
         management_ip: "{{ ansible_host }}"
         phase: post
         timestamp: "{{ snapshot_timestamp }}"
-        tenant_count: "{{ snap_post_all_as3_declarations | default([]) | length }}"
         note: >-
-          AS3 declarations represent desired/declared state only.
-          One entry per AS3 tenant/partition.
-          For operational status (up/down) see the post.json snapshot.
-      declarations: "{{ snap_post_all_as3_declarations | default([]) }}"
+          AS3 declarations from /Common - returns all tenants in one call.
+          Represents desired/declared state only.
+          For operational status see the post.json snapshot.
+      declaration: "{{ snap_post_as3_info.ansible_facts.ansible_net_as3_config | default({}) }}"
   delegate_to: localhost
   when:
-    - snap_post_all_as3_declarations is defined
+    - snap_post_as3_info is not failed
+    - snap_post_as3_info.ansible_facts is defined
+    - snap_post_as3_info.ansible_facts.ansible_net_as3_config is defined
+
+# -----------------------------------------------------------------------------
+# AS3 Declaration Diff
+# Load pre AS3 snapshot and compare against post.
+# AS3 declarations should survive upgrade unchanged.
+# Differences are flagged as WARNING - not a failure since the upgrade
+# itself should not modify AS3 config.
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_POST | Check if pre AS3 snapshot exists"
+  ansible.builtin.stat:
+    path: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre_as3.json"
+  register: pre_as3_stat
+  delegate_to: localhost
+
+- name: "SNAPSHOT_POST | Load pre AS3 snapshot"
+  ansible.builtin.set_fact:
+    snap_pre_as3_loaded: "{{ lookup('file', snapshot_output_dir + '/' + inventory_hostname + '_' + snapshot_timestamp + '_pre_as3.json') | from_json }}"
+  delegate_to: localhost
+  when: pre_as3_stat.stat.exists
+
+- name: "SNAPSHOT_POST | Compute AS3 declaration diff"
+  ansible.builtin.set_fact:
+    diff_as3:
+      pre_declaration: "{{ snap_pre_as3_loaded.declaration | default({}) }}"
+      post_declaration: "{{ snap_post_as3_info.ansible_facts.ansible_net_as3_config | default({}) }}"
+      changed: >-
+        {{ snap_pre_as3_loaded.declaration | default({}) | to_json !=
+           snap_post_as3_info.ansible_facts.ansible_net_as3_config | default({}) | to_json }}
+  when:
+    - pre_as3_stat.stat.exists
+    - snap_post_as3_info is not failed
+    - snap_post_as3_info.ansible_facts is defined
+    - snap_post_as3_info.ansible_facts.ansible_net_as3_config is defined
+
+- name: "SNAPSHOT_POST | AS3 declaration unchanged - OK"
+  ansible.builtin.debug:
+    msg: "AS3 declarations unchanged pre vs post - OK"
+  when:
+    - diff_as3 is defined
+    - not diff_as3.changed | bool
+
+- name: "SNAPSHOT_POST | WARNING - AS3 declaration changed during upgrade"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: AS3 declarations differ between pre and post upgrade snapshots
+      on {{ inventory_hostname }}. AS3 config should not change during an upgrade.
+      Review pre_as3.json and post_as3.json to identify changes.
+  when:
+    - diff_as3 is defined
+    - diff_as3.changed | bool
     - snap_post_all_as3_declarations | length > 0
 
 - name: "SNAPSHOT_POST | Fallback - empty VS and pool lists if no partitions"
@@ -285,6 +333,7 @@
       virtual_servers: "{{ diff_vs }}"
       routes: "{{ diff_routes }}"
       regression_summary: "{{ diff_regression_summary }}"
+      as3: "{{ diff_as3 | default({'note': 'AS3 not present or pre snapshot not available'}) }}"
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------

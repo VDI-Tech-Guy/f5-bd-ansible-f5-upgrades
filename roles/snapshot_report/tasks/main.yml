@@ -59,6 +59,13 @@
         After  : {{ report_diff.routes.post_line_count }} lines
         Changed: {{ report_diff.routes.changed }}
 
+- name: "REPORT | AS3 Declarations"
+  ansible.builtin.debug:
+    msg: >-
+      AS3 DECLARATIONS:
+        Changed : {{ report_diff.as3.changed | default('n/a') }}
+        Result  : {{ 'WARNING - declarations changed during upgrade' if report_diff.as3.changed | default(false) | bool else 'OK - unchanged' }}
+
 - name: "REPORT | Changed Virtual Servers (state changed but not necessarily regressed)"
   ansible.builtin.debug:
     msg: >-
