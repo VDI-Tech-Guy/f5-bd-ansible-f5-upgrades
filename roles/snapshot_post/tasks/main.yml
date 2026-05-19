@@ -156,7 +156,6 @@
   when:
     - diff_as3 is defined
     - diff_as3.changed | bool
-    - diff_as3 | length > 0
 
 - name: "SNAPSHOT_POST | Fallback - empty VS and pool lists if no partitions"
   ansible.builtin.set_fact:
@@ -244,9 +243,9 @@
       virtual_servers: "{{ snap_post_all_virtual_servers | default([]) }}"
       ltm_pools: "{{ snap_post_all_ltm_pools | default([]) }}"
       routes: >-
-          {{ test_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
+          {{ snap_post_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
       arp: >-
-          {{ test_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
+          {{ snap_post_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
   delegate_to: localhost
 
 # -----------------------------------------------------------------------------
