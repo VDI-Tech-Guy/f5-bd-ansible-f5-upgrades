@@ -305,15 +305,19 @@
       ansible.builtin.set_fact:
         diff_test_routes:
           snap1_count: "{{ snap1_loaded.routes | default([]) | length }}"
-          snap2_count: "{{ snap2_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}"
-          changed: "{{ snap1_loaded.routes | default([]) | length != snap2_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}"
+          snap2_count: >-
+            {{ snap2_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
+          changed: >-
+            {{ snap1_loaded.routes | default([]) | length != snap2_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
 
     - name: "TEST | Diff - ARP count"
       ansible.builtin.set_fact:
         diff_test_arp:
           snap1_count: "{{ snap1_loaded.arp | default([]) | length }}"
-          snap2_count: "{{ snap2_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}"
-          changed: "{{ snap1_loaded.arp | default([]) | length != snap2_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}"
+          snap2_count: >-
+            {{ snap2_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
+          changed: >-
+            {{ snap1_loaded.arp | default([]) | length != snap2_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
 
     - name: "TEST | Diff - AS3 declarations"
       ansible.builtin.set_fact:
