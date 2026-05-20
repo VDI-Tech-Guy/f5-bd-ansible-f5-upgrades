@@ -108,22 +108,70 @@ AAP EE  <── HTTPS/SSH ──>  BIG-IP mgmt
 
 ---
 
-## BIG-IP HA Pair Upgrade
+## License Management
+
+The `bigip_license` role checks `serviceCheckDate` against today's date and reactivates if needed. It runs before image staging on both HA nodes and before upgrade on standalone.
+
+### How it works
+
+1. Reads `serviceCheckDate` and `registrationKey` from `/mgmt/tm/sys/license` via REST
+2. Compares `serviceCheckDate` against today — if valid, skips reactivation entirely
+3. If reactivation needed: `bigip_license` module on the EE contacts `activate.f5.com` directly — BIG-IP does **not** need internet access
+4. After reactivation the device goes `Offline` briefly while services restart
+5. Polls `sync-status` until `Changes Pending` or `In Sync` (positive poll — only exits on known-good states)
+6. If `Changes Pending` → triggers config sync, polls until `In Sync`
+7. Confirms new `serviceCheckDate >= today` before proceeding
+
+### Modes
+
+| Mode | Behaviour |
+|---|---|
+| `automatic` | EE proxies reactivation to `activate.f5.com`. BIG-IP needs no internet. Standard reg key licenses only. **Default.** |
+| `check_only` | Validates `serviceCheckDate` only. Hard fails if expired with clear message. |
+| `skip` | Skips license check for all hosts. |
+| `bigip_license_skip: true` | Skips license role for a specific host (set in inventory host vars). |
+
+### BIG-IQ Licensed Devices
+
+> **Important**: If your BIG-IP was licensed through BIG-IQ (pool license or BIG-IQ issued registration key), set `bigip_license_skip: true` and reactivate manually through BIG-IQ **before** running the upgrade playbook. Do not use `automatic` mode — `SOAPLicenseClient` points to `activate.f5.com` not your BIG-IQ instance and may break BIG-IQ license tracking.
+>
+> Set `bigip_license_skip: true` in AAP inventory host vars (not extra_vars) so it applies per-device.
+
+### HA Behaviour
+
+| Play | Host | Mode | Notes |
+|---|---|---|---|
+| Play 1a | Standby | From extra_vars (`automatic` default) | Safe — standby going Offline briefly is acceptable |
+| Play 1b | Active | Always `check_only` (hardcoded) | Never auto-reactivates active — risks failover |
+| Play 6 | Old-active (now standby) | From extra_vars, `skip_sync=true` (hardcoded) | Nodes on different versions — sync skipped, `Changes Pending` clears after both nodes upgraded |
+
+### Key Extra Variables
+
+```yaml
+bigip_license_mode: automatic        # automatic | check_only | skip
+bigip_license_skip: false            # set true per-host in inventory for BIG-IQ licensed devices
+bigip_license_server: activate.f5.com  # must be reachable from AAP EE
+bigip_license_skip_sync: false       # managed automatically by Play 6 - do not override
+```
+
 
 ### Upgrade Flow
 
 ```
-Play 0  Pre-flight        Validate vars, detect live HA role (active/standby),
-                          check versions, detect split-brain resume condition
-Play 1  Image staging     bastion SCP → BIG-IP /shared/images/ (both nodes)
-Play 2  Pre-snapshot      Collect VS, pools, routes, ARP, sync state (both nodes)
-Play 3  Upgrade standby   Install + activate → URI volume poll → reboot → bigip_wait
-Play 4  Verify standby    Post-snapshot + diff report on standby
-Play 5  Failover          Force active → standby on original active node
-Play 6  Upgrade active    Install + activate → URI volume poll → reboot → bigip_wait
-Play 7  Failback          Optional: restore original active/standby roles
-Play 8  Final snapshot    Post-snapshot + diff report (both nodes)
-Play 9  Store artifacts   Copy JSONs + UCS from EE to bastion CIFS
+Play 0   Pre-flight         Validate vars, detect live HA role (active/standby),
+                            check versions, detect split-brain resume condition
+Play 1a  License (standby)  Check/reactivate license on standby via EE proxy
+Play 1b  License (active)   Check license on active (check_only - no reactivation)
+Play 2   Image staging      bastion SCP → BIG-IP /shared/images/ (both nodes)
+Play 3   Pre-snapshot       Collect VS, pools, routes, ARP, sync state (both nodes)
+Play 4   Upgrade standby    Install + activate → URI volume poll → reboot → bigip_wait
+Play 5   Verify standby     Post-snapshot + diff report on standby
+Play 6   License (old-active) Reactivate old-active (now standby), skip_sync=true
+Play 7   Failover           Force active → standby on original active node
+Play 8   Upgrade active     Install + activate → URI volume poll → reboot → bigip_wait
+Play 9   Failback           Optional: restore original active/standby roles
+Play 10  Final snapshot     Post-snapshot + diff report (both nodes)
+Play 11  Store artifacts    Copy JSONs + UCS from EE to bastion CIFS
 ```
 
 ### Split-Brain Detection

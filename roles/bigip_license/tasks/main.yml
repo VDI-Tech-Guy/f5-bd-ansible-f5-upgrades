@@ -1,0 +1,384 @@
+---
+# =============================================================================
+# bigip_license - Check and reactivate BIG-IP license via EE proxy
+# =============================================================================
+# Checks serviceCheckDate and reactivates if needed via activate.f5.com.
+# The AAP EE contacts activate.f5.com directly - BIG-IP needs no internet.
+#
+# IMPORTANT - BIG-IQ Licensed Devices:
+#   If your BIG-IP was licensed through BIG-IQ, set bigip_license_skip: true
+#   and reactivate manually through BIG-IQ before running the upgrade.
+#   SOAPLicenseClient points to activate.f5.com not your BIG-IQ instance
+#   and may break BIG-IQ license tracking if used on BIG-IQ licensed devices.
+#
+# Modes:
+#   bigip_license_mode: automatic   - reactivate via activate.f5.com
+#   bigip_license_mode: check_only  - validate only, FAIL if expired
+#   bigip_license_mode: skip        - skip all license tasks
+#   bigip_license_skip: true        - skip this role for a specific host
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Skip - host level
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | Skip - bigip_license_skip=true"
+  ansible.builtin.debug:
+    msg: |
+      Skipping all license tasks for {{ inventory_hostname }}
+      Reason: bigip_license_skip=true
+      Note: If BIG-IQ licensed ensure license is current via BIG-IQ before upgrade.
+  when: bigip_license_skip | default(false) | bool
+
+- name: "LICENSE | End host - bigip_license_skip=true"
+  ansible.builtin.meta: end_host
+  when: bigip_license_skip | default(false) | bool
+
+# -----------------------------------------------------------------------------
+# Skip - mode level
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | Skip - mode=skip"
+  ansible.builtin.debug:
+    msg: "Skipping license check for {{ inventory_hostname }} - mode=skip"
+  when: bigip_license_mode == 'skip'
+
+- name: "LICENSE | End host - mode=skip"
+  ansible.builtin.meta: end_host
+  when: bigip_license_mode == 'skip'
+
+# -----------------------------------------------------------------------------
+# Step 1 - Read current license state
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | Read current license state"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/license"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    timeout: 60
+  register: bigip_license_info
+  delegate_to: localhost
+  # TROUBLESHOOTING: no_log: true
+
+- name: "LICENSE | Parse license fields"
+  ansible.builtin.set_fact:
+    bigip_service_check_date: >-
+      {{ bigip_license_info.json.entries
+         ['https://localhost/mgmt/tm/sys/license/0']
+         .nestedStats.entries.serviceCheckDate.description
+         | default('1970/01/01') }}
+    bigip_registration_key: >-
+      {{ bigip_license_info.json.entries
+         ['https://localhost/mgmt/tm/sys/license/0']
+         .nestedStats.entries.registrationKey.description
+         | default('') }}
+    bigip_licensed_on: >-
+      {{ bigip_license_info.json.entries
+         ['https://localhost/mgmt/tm/sys/license/0']
+         .nestedStats.entries.licensedOnDate.description
+         | default('unknown') }}
+
+- name: "LICENSE | Set today's date"
+  ansible.builtin.set_fact:
+    bigip_today: "{{ lookup('pipe', 'date +%Y/%m/%d') }}"
+
+- name: "LICENSE | Display current license state"
+  ansible.builtin.debug:
+    msg: |
+      {{ inventory_hostname }} license state:
+      Registration Key   : {{ bigip_registration_key }}
+      Licensed On        : {{ bigip_licensed_on }}
+      Service Check Date : {{ bigip_service_check_date }}
+      Today              : {{ bigip_today }}
+      Status             : {{ 'VALID' if bigip_service_check_date >= bigip_today else 'NEEDS REACTIVATION' }}
+
+# -----------------------------------------------------------------------------
+# Step 2 - Compare serviceCheckDate against today
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | Determine if reactivation needed"
+  ansible.builtin.set_fact:
+    bigip_license_needs_reactivation: "{{ bigip_service_check_date < bigip_today }}"
+
+- name: "LICENSE | License is valid - no reactivation needed"
+  ansible.builtin.debug:
+    msg: "License valid on {{ inventory_hostname }} - serviceCheckDate={{ bigip_service_check_date }} >= today={{ bigip_today }}"
+  when: not bigip_license_needs_reactivation | bool
+
+- name: "LICENSE | End host - license valid"
+  ansible.builtin.meta: end_host
+  when: not bigip_license_needs_reactivation | bool
+
+# -----------------------------------------------------------------------------
+# License needs reactivation from here down
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | License requires reactivation"
+  ansible.builtin.debug:
+    msg: |
+      License requires reactivation on {{ inventory_hostname }}
+      Service Check Date : {{ bigip_service_check_date }}
+      Today              : {{ bigip_today }}
+      Mode               : {{ bigip_license_mode }}
+
+# -----------------------------------------------------------------------------
+# check_only - fail with clear message
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | FAIL - license expired and mode=check_only"
+  ansible.builtin.fail:
+    msg: |
+      LICENSE EXPIRED on {{ inventory_hostname }}
+      Service Check Date : {{ bigip_service_check_date }}
+      Today              : {{ bigip_today }}
+      Upgrade cannot proceed safely without reactivation.
+      Options:
+        - Set bigip_license_mode=automatic to reactivate via AAP EE
+          (standard registration key licenses only)
+        - If BIG-IQ licensed: set bigip_license_skip=true and reactivate
+          manually through BIG-IQ before re-running the upgrade
+        - Set bigip_license_mode=skip to bypass this check (not recommended)
+  when: bigip_license_mode == 'check_only'
+
+# -----------------------------------------------------------------------------
+# Step 3 - Reactivate via EE proxy to activate.f5.com (automatic mode)
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | Fail if registration key not found"
+  ansible.builtin.fail:
+    msg: |
+      Could not read registration key from {{ inventory_hostname }}.
+      If this device is BIG-IQ licensed set bigip_license_skip=true
+      and reactivate manually through BIG-IQ.
+  when: bigip_registration_key | length == 0
+
+- name: "LICENSE | Reactivate license via f5_modules bigip_device_license"
+  f5networks.f5_modules.bigip_device_license:
+    license_key: "{{ bigip_registration_key }}"
+    license_server: "{{ bigip_license_server | default('activate.f5.com') }}"
+    state: present
+    provider:
+      server: "{{ ansible_host }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+      server_port: "{{ bigip_https_port | default(443) }}"
+      validate_certs: false
+  register: bigip_license_result
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+  # TROUBLESHOOTING: no_log: true
+
+- name: "LICENSE | Reactivation triggered - device will briefly go Offline"
+  ansible.builtin.debug:
+    msg: |
+      License reactivation triggered on {{ inventory_hostname }}
+      Device will go Offline briefly while services restart.
+      Polling sync-status until Changes Pending or In Sync...
+
+# -----------------------------------------------------------------------------
+# Step 4 - Poll sync-status until device back online
+# Poll for POSITIVE condition only - exit when known-good state reached
+# 'Changes Pending' = back up, manual sync mode
+# 'In Sync'         = back up, auto sync mode
+# All other states  = still transitioning, keep waiting
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | Pause to allow service restart to begin"
+  ansible.builtin.pause:
+    seconds: 20
+
+- name: "LICENSE | Poll sync-status until Changes Pending or In Sync"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/cm/sync-status/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    timeout: 30
+  register: bigip_license_sync_poll
+  delegate_to: localhost
+  retries: 30
+  delay: 10
+  until: >-
+    bigip_license_sync_poll.status == 200 and
+    bigip_license_sync_poll.json.get('entries', {})
+    .get('https://localhost/mgmt/tm/cm/sync-status/0/stats', {})
+    .get('nestedStats', {})
+    .get('entries', {})
+    .get('status', {})
+    .get('description', '') in ['Changes Pending', 'In Sync']
+  failed_when: false
+  # TROUBLESHOOTING: no_log: true
+
+- name: "LICENSE | Set post-reactivation sync state"
+  ansible.builtin.set_fact:
+    bigip_post_license_sync_state: >-
+      {{ bigip_license_sync_poll.json.get('entries', {})
+         .get('https://localhost/mgmt/tm/cm/sync-status/0/stats', {})
+         .get('nestedStats', {})
+         .get('entries', {})
+         .get('status', {})
+         .get('description', 'unknown') }}
+
+- name: "LICENSE | Device back online - sync state: {{ bigip_post_license_sync_state }}"
+  ansible.builtin.debug:
+    msg: "{{ inventory_hostname }} back online - sync state: {{ bigip_post_license_sync_state }}"
+
+# -----------------------------------------------------------------------------
+# Step 5 - Handle sync state
+# Changes Pending = manual sync mode - trigger sync if skip_sync=false
+# In Sync         = auto sync mode - nothing to do
+# skip_sync=true  = version mismatch window - skip sync, will clear later
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | Discover sync-failover device group"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/cm/device-group"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    timeout: 30
+  register: bigip_device_group_list
+  delegate_to: localhost
+  when:
+    - bigip_post_license_sync_state == 'Changes Pending'
+    - not bigip_license_skip_sync | default(false) | bool
+  # TROUBLESHOOTING: no_log: true
+
+- name: "LICENSE | Set sync-failover device group fact"
+  ansible.builtin.set_fact:
+    bigip_discovered_device_group: >-
+      {{ bigip_device_group_list.json.items
+         | default([])
+         | selectattr('type', 'equalto', 'sync-failover')
+         | map(attribute='name')
+         | list
+         | first
+         | default('') }}
+  when:
+    - bigip_post_license_sync_state == 'Changes Pending'
+    - not bigip_license_skip_sync | default(false) | bool
+    - bigip_device_group_list is not failed
+
+- name: "LICENSE | Display discovered device group"
+  ansible.builtin.debug:
+    msg: "Discovered sync-failover device group: {{ bigip_discovered_device_group | default('none found') }}"
+  when:
+    - bigip_post_license_sync_state == 'Changes Pending'
+    - not bigip_license_skip_sync | default(false) | bool
+
+- name: "LICENSE | Fail if no sync-failover device group found"
+  ansible.builtin.fail:
+    msg: |
+      No sync-failover device group found on {{ inventory_hostname }}.
+      Cannot trigger config sync to clear Changes Pending.
+      Check device group configuration or set bigip_license_skip_sync=true
+      to skip sync and clear Changes Pending manually.
+  when:
+    - bigip_post_license_sync_state == 'Changes Pending'
+    - not bigip_license_skip_sync | default(false) | bool
+    - bigip_discovered_device_group | default('') == ''
+
+- name: "LICENSE | Trigger config sync to clear Changes Pending"
+  f5networks.f5_bigip.bigip_configsync_action:
+    device_group: "{{ bigip_discovered_device_group }}"
+    sync_device_to_group: true
+  when:
+    - bigip_post_license_sync_state == 'Changes Pending'
+    - not bigip_license_skip_sync | default(false) | bool
+    - bigip_discovered_device_group | default('') != ''
+
+- name: "LICENSE | Skipping sync - bigip_license_skip_sync=true"
+  ansible.builtin.debug:
+    msg: |
+      Skipping config sync on {{ inventory_hostname }}
+      Changes Pending will clear after both nodes on same version.
+  when:
+    - bigip_post_license_sync_state == 'Changes Pending'
+    - bigip_license_skip_sync | default(false) | bool
+
+- name: "LICENSE | Poll until In Sync after manual sync"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/cm/sync-status/stats"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    timeout: 30
+  register: bigip_license_sync_confirm
+  delegate_to: localhost
+  retries: 20
+  delay: 10
+  until: >-
+    bigip_license_sync_confirm.status == 200 and
+    bigip_license_sync_confirm.json.get('entries', {})
+    .get('https://localhost/mgmt/tm/cm/sync-status/0/stats', {})
+    .get('nestedStats', {})
+    .get('entries', {})
+    .get('status', {})
+    .get('description', '') == 'In Sync'
+  when:
+    - bigip_post_license_sync_state == 'Changes Pending'
+    - not bigip_license_skip_sync | default(false) | bool
+  # TROUBLESHOOTING: no_log: true
+
+# -----------------------------------------------------------------------------
+# Step 6 - Confirm new serviceCheckDate >= today
+# -----------------------------------------------------------------------------
+
+- name: "LICENSE | Re-read license to confirm reactivation"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/license"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    timeout: 60
+  register: bigip_license_post
+  delegate_to: localhost
+  # TROUBLESHOOTING: no_log: true
+
+- name: "LICENSE | Parse new serviceCheckDate"
+  ansible.builtin.set_fact:
+    bigip_new_service_check_date: >-
+      {{ bigip_license_post.json.entries
+         ['https://localhost/mgmt/tm/sys/license/0']
+         .nestedStats.entries.serviceCheckDate.description
+         | default('1970/01/01') }}
+
+- name: "LICENSE | Fail if serviceCheckDate still expired after reactivation"
+  ansible.builtin.fail:
+    msg: |
+      License reactivation may have failed on {{ inventory_hostname }}
+      Service Check Date after reactivation: {{ bigip_new_service_check_date }}
+      Expected date >= {{ bigip_today }}
+      If BIG-IQ licensed set bigip_license_skip=true and reactivate via BIG-IQ.
+      Otherwise check EE connectivity to activate.f5.com and retry.
+  when: bigip_new_service_check_date < bigip_today
+
+- name: "LICENSE | Reactivation confirmed"
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      LICENSE REACTIVATION COMPLETE - {{ inventory_hostname }}
+      ------------------------------------------------------------
+      Previous Service Check Date : {{ bigip_service_check_date }}
+      New Service Check Date      : {{ bigip_new_service_check_date }}
+      Sync State                  : {{ bigip_post_license_sync_state }}
+      Status                      : OK - proceeding with upgrade
+      ============================================================

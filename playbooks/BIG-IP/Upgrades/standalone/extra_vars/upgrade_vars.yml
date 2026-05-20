@@ -28,7 +28,9 @@
 # CONNECTION TIMEOUTS
 # ansible_command_timeout controls how long the persistent httpapi connection
 # waits for module responses. Default is 30s which is too short for
-# bigip_device_info which makes internal AS3/package checks on init.
+# bigip_device_info (AS3/package checks on init) and bigip_ucs_fetch
+# (UCS creation takes significantly longer when AS3 is installed - known issue).
+# Set to match bigip_ucs_timeout.
 # Set here in extra_vars to ensure AAP picks it up (highest precedence).
 # =============================================================================
 ansible_command_timeout: 600
@@ -70,6 +72,33 @@ bigip_reboot_after_install: true
 bigip_upgrade_dry_run: false
 
 # =============================================================================
+# LICENSE
+# =============================================================================
+# bigip_license_mode:
+#   automatic   - EE proxies reactivation to activate.f5.com (recommended)
+#                 BIG-IP does NOT need internet access - EE handles it
+#   check_only  - validate serviceCheckDate only, FAIL if expired
+#   skip        - skip license check for all hosts
+#
+# bigip_license_skip: true
+#   Set per-host in inventory vars to skip license role for specific devices
+#   Use for BIG-IQ licensed devices, lab/VE, air-gapped environments
+#
+# IMPORTANT - BIG-IQ Licensed Devices:
+#   Set bigip_license_skip: true and reactivate manually via BIG-IQ before
+#   running the upgrade. Do NOT use automatic mode on BIG-IQ licensed devices.
+bigip_license_mode: automatic
+bigip_license_skip: false
+
+# F5 license server - must be reachable from AAP EE, not from BIG-IP
+bigip_license_server: "activate.f5.com"
+
+
+# Skip config sync after reactivation when nodes are on different versions
+# Set automatically by Play 6 in HA - do not override here
+bigip_license_skip_sync: false
+
+# =============================================================================
 # HA OPTIONS
 # =============================================================================
 
@@ -88,7 +117,17 @@ bigip_https_port: 443
 # SNAPSHOT / BACKUP SETTINGS
 # =============================================================================
 
-# Fetch UCS from BIG-IP and store on bastion
+# Save UCS backup from BIG-IP before upgrade and store on bastion
+# Set false to skip UCS backup entirely - recommended if:
+#   - AS3 is installed (UCS creation can take 30+ min - known F5 issue)
+#   - Storage space on bastion is limited
+#   - You have an alternative backup process
+# Only a pre-upgrade UCS is taken (no post) - this is your rollback point
+# KNOWN ISSUE: UCS creation takes significantly longer when AS3 is installed
+# due to AS3 including all tenant declarations in the backup.
+# Default timeout is 1800s (30 min) to account for this.
+# Increase further on large devices with many AS3 tenants.
+bigip_ucs_timeout: 1800
 bigip_snapshot_save_ucs: true
 
 # BIG-IP directory where UCS files are saved before fetch

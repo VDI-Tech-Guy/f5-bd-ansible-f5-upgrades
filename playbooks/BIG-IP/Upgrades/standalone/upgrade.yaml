@@ -4,11 +4,11 @@
 # =============================================================================
 # Upgrade order:
 #   0. Pre-flight    - validate extra_vars, check version, set timestamps
-#   1. Image staging - bastion CIFS -> SCP -> BIG-IP
-#   2. Pre-snapshot  - collect baseline state
-#   3. Upgrade       - install and activate image, wait for device to return
-#   4. Post-snapshot - collect post-upgrade state, diff, report
-#   5. Store artifacts on bastion (JSON diffs + UCS)
+#   2. Image staging - bastion CIFS -> SCP -> BIG-IP
+#   3. Pre-snapshot  - collect baseline state
+#   4. Upgrade       - install and activate image, wait for device to return
+#   5. Post-snapshot - collect post-upgrade state, diff, report
+#   6. Store artifacts on bastion (JSON diffs + UCS)
 #
 # AAP 2.6 Setup:
 #   Project    : f5-bd-ansible-f5-upgrades
@@ -95,9 +95,20 @@
 
 
 # =============================================================================
-# PLAY 1 - Image staging: bastion CIFS -> SCP -> BIG-IP
+# PLAY 1 - License check and reactivation
 # =============================================================================
-- name: "BIG-IP Standalone Upgrade - Play 1: Stage Image via Bastion"
+- name: "BIG-IP Standalone Upgrade - Play 1: License Check and Reactivation"
+  hosts: "{{ target_hosts | default('bigip_standalone') }}"
+  gather_facts: false
+  roles:
+    - role: bigip_license
+  tags: [license]
+
+
+# =============================================================================
+# PLAY 2 - Image staging: bastion CIFS -> SCP -> BIG-IP
+# =============================================================================
+- name: "BIG-IP Standalone Upgrade - Play 2: Stage Image via Bastion"
   hosts: "{{ target_hosts | default('bigip_standalone') }}"
   gather_facts: false
   roles:

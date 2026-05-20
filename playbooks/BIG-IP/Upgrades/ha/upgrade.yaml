@@ -4,9 +4,9 @@
 # =============================================================================
 # Upgrade order:
 #   0. Pre-flight    - validate extra_vars, detect live ha_role, set timestamps
-#   1. Image staging - bastion CIFS -> SCP -> both BIG-IP units
-#   2. Pre-snapshot  - both units (JSON written to EE runner)
-#   3. Upgrade standby  -> reboot -> layered wait -> verify standby clean
+#   2. Image staging - bastion CIFS -> SCP -> both BIG-IP units
+#   3. Pre-snapshot  - both units (JSON written to EE runner)
+#   4. Upgrade standby  -> reboot -> layered wait -> verify standby clean
 #   4. Force failover   (standby becomes active)
 #   5. Upgrade old-active (now standby) -> reboot -> layered wait
 #   6. Optional failback
@@ -208,9 +208,48 @@
 
 
 # =============================================================================
-# PLAY 1 - Image staging: bastion CIFS -> SCP -> both BIG-IP units
+# PLAY 1 - License check and reactivation (both nodes)
+# Runs on both nodes before upgrade begins while both are on same version.
+# Reactivation causes brief Offline period - standby is safe, active is risky.
+# Active node reactivation is handled separately after failover (Play 7).
+#
+# bigip_license_skip: true   - skip entirely for a host (lab/VE/air-gapped)
+# bigip_license_mode:
+#   automatic   - EE proxies to activate.f5.com (recommended)
+#   check_only  - validate only, fail if expired (default - safe)
+#   skip        - skip license check for all hosts
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 1: Stage Image on Both Units via Bastion"
+- name: "BIG-IP HA Upgrade - Play 1a: License Check on Standby"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  pre_tasks:
+    - name: "LICENSE | Skip - only run on standby unit"
+      ansible.builtin.meta: end_host
+      when: bigip_ha_role | default('unknown') != 'standby'
+  roles:
+    - role: bigip_license
+  tags: [license]
+
+- name: "BIG-IP HA Upgrade - Play 1b: License Check on Active"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  pre_tasks:
+    - name: "LICENSE | Skip - only run on active unit"
+      ansible.builtin.meta: end_host
+      when: bigip_ha_role | default('unknown') != 'active'
+  vars:
+    # Active node reactivation causes a failover - only check, do not reactivate
+    # If active needs reactivation it will be handled after failover in Play 7
+    bigip_license_mode: check_only
+  roles:
+    - role: bigip_license
+  tags: [license]
+
+
+# =============================================================================
+# PLAY 2 - Image staging: bastion CIFS -> SCP -> both BIG-IP units
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 2: Stage Image on Both Units via Bastion"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   roles:
@@ -224,6 +263,7 @@
 - name: "BIG-IP HA Upgrade - Play 2: Pre-Snapshot (Both Units)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
+  serial: 1
   roles:
     - role: snapshot_pre
   tags: [snapshot, pre_snapshot]
@@ -337,9 +377,29 @@
 
 
 # =============================================================================
-# PLAY 6 - Upgrade old-active (now standby after failover)
+# PLAY 6 - License reactivation on old-active (now standby after failover)
+# Runs after failover so old-active is now standby - safe to reactivate.
+# bigip_license_skip_sync=true because nodes are on different versions -
+# sync will fail. Changes Pending clears after both nodes on same version.
 # =============================================================================
-- name: "BIG-IP HA Upgrade - Play 6: Upgrade Old-Active (Now Standby)"
+- name: "BIG-IP HA Upgrade - Play 6: License Reactivation on Old-Active (Now Standby)"
+  hosts: "{{ target_hosts | default('bigip_ha') }}"
+  gather_facts: false
+  pre_tasks:
+    - name: "LICENSE | Skip - only run on original active (now standby)"
+      ansible.builtin.meta: end_host
+      when: bigip_ha_role | default('unknown') != 'active'
+  vars:
+    bigip_license_skip_sync: true
+  roles:
+    - role: bigip_license
+  tags: [license]
+
+
+# =============================================================================
+# PLAY 7 - Upgrade old-active (now standby after failover)
+# =============================================================================
+- name: "BIG-IP HA Upgrade - Play 7: Upgrade Old-Active (Now Standby)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
   pre_tasks:

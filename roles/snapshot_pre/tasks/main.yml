@@ -166,17 +166,138 @@
          | default({}) | json_query('status') | default('unknown') }}
 
 # -----------------------------------------------------------------------------
-# Save UCS backup
+# -----------------------------------------------------------------------------
+# Increase REST framework timeouts before UCS backup
+# Required when AS3 or other iAppLX packages are installed
+# These packages slow down the REST framework and default timeouts are too low
 # -----------------------------------------------------------------------------
 
-- name: "SNAPSHOT_PRE | Save and fetch UCS backup from BIG-IP to EE"
-  f5networks.f5_bigip.bigip_ucs_fetch:
-    src: "pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}"
-    dest: "{{ snapshot_output_dir }}/"
-    create_on_missing: true
-    fail_on_missing: false
-  register: snap_ucs_save
+- name: "SNAPSHOT_PRE | Increase iapplxrpm timeout for UCS backup"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh modify sys db iapplxrpm.timeout value 300"
   when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Increase restjavad timeout for UCS backup"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh modify sys db restjavad.timeout value 300"
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Increase restnoded timeout for UCS backup"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh modify sys db restnoded.timeout value 180"
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Increase icrd timeout for UCS backup"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh modify sys db icrd.timeout value 180"
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Save config after timeout changes"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "tmsh save sys config"
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Restart restjavad and restnoded services"
+  f5networks.f5_bigip.bigip_command:
+    commands:
+      - "run util bash -c 'bigstart restart restjavad restnoded'"
+  ignore_errors: true
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Pause for services to restart"
+  ansible.builtin.pause:
+    seconds: 60
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Wait for REST API to be ready after restart"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/shared/echo"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    timeout: 30
+  register: bigip_rest_ready
+  until:
+    - bigip_rest_ready.status == 200
+    - bigip_rest_ready.json.stage is defined
+    - bigip_rest_ready.json.stage == 'STARTED'
+  retries: 20
+  delay: 15
+  delegate_to: localhost
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Reset httpapi connection after service restart"
+  ansible.builtin.meta: reset_connection
+
+# -----------------------------------------------------------------------------
+# Save UCS backup - two-step pattern per f5networks.f5_bigip documentation
+# Step 1: Trigger UCS creation - dest only, returns task_id and src
+# Step 2: Poll until complete and download - uses task_id and src from Step 1
+# NOTE: AS3 installed significantly increases UCS creation time - known F5 issue
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Step 1 - Trigger UCS creation on BIG-IP"
+  f5networks.f5_bigip.bigip_ucs_fetch:
+    dest: "/tmp/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+    timeout: "{{ bigip_ucs_timeout | default(1800) }}"
+  register: snap_ucs_task
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Step 1 result"
+  ansible.builtin.debug:
+    msg: "UCS triggered - task_id={{ snap_ucs_task.task_id | default('n/a') }} src={{ snap_ucs_task.src | default('n/a') }}"
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Step 2 - Poll until UCS complete and download to EE"
+  f5networks.f5_bigip.bigip_ucs_fetch:
+    dest: "/tmp/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+    src: "{{ snap_ucs_task.src }}"
+    task_id: "{{ snap_ucs_task.task_id }}"
+    timeout: "{{ bigip_ucs_timeout | default(1800) }}"
+  register: snap_ucs_save
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - snap_ucs_task.task_id is defined
+
+- name: "SNAPSHOT_PRE | Copy UCS from tmp to snapshot output dir"
+  ansible.builtin.copy:
+    src: "/tmp/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+    dest: "{{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+    remote_src: false
+    mode: '0644'
+  delegate_to: localhost
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - snap_ucs_save is not failed
+
+- name: "SNAPSHOT_PRE | Confirm UCS downloaded to EE"
+  ansible.builtin.stat:
+    path: "{{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+  register: ucs_stat_check
+  delegate_to: localhost
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | UCS download confirmed"
+  ansible.builtin.debug:
+    msg: "UCS saved to EE: {{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs ({{ ucs_stat_check.stat.size | default(0) | filesizeformat }})"
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - ucs_stat_check.stat.exists | default(false)
+
+- name: "SNAPSHOT_PRE | WARNING - UCS file not found on EE after fetch"
+  ansible.builtin.debug:
+    msg: "WARNING: UCS fetch may have failed for {{ inventory_hostname }} - file not found on EE at {{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - not ucs_stat_check.stat.exists | default(false)
 
 # -----------------------------------------------------------------------------
 # Write pre-snapshot JSON

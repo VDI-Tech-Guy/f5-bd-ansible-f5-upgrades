@@ -85,7 +85,7 @@
     msg: |
       ============================================================
       OVERALL RESULT : PASS
-      Diff file      : {{ snapshot_output_dir }}/{{ report_diff.metadata.hostname }}_{{ snapshot_timestamp }}_diff.json
+      Diff file      : {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json
       ============================================================
   when:
     - report_diff.regression_summary.vs_regression_count | int == 0
@@ -96,6 +96,6 @@
       ============================================================
       OVERALL RESULT : FAIL - REGRESSIONS DETECTED
       VS regressions : {{ report_diff.regression_summary.vs_regression_count }}
-      Diff file      : {{ snapshot_output_dir }}/{{ report_diff.metadata.hostname }}_{{ snapshot_timestamp }}_diff.json
+      Diff file      : {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_diff.json
       ============================================================
   when: report_diff.regression_summary.vs_regression_count | int > 0
