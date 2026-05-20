@@ -19,9 +19,12 @@
   gather_facts: false
   vars:
     test_output_dir: "/runner/artifacts/snapshots/test"
-    test_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
-    snapshot_timestamp: "{{ test_timestamp }}"
   tasks:
+
+    - name: "TEST | Lock timestamp at play start"
+      ansible.builtin.set_fact:
+        test_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+        cacheable: true
 
     - name: "TEST | Ensure test output dir exists"
       ansible.builtin.file:
