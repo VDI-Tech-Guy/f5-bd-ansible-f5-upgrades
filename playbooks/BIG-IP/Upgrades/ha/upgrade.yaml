@@ -263,6 +263,7 @@
 - name: "BIG-IP HA Upgrade - Play 2: Pre-Snapshot (Both Units)"
   hosts: "{{ target_hosts | default('bigip_ha') }}"
   gather_facts: false
+  serial: 1
   roles:
     - role: snapshot_pre
   tags: [snapshot, pre_snapshot]
