@@ -248,7 +248,7 @@
 - name: "SNAPSHOT_PRE | Step 1 - Trigger UCS creation on BIG-IP"
   f5networks.f5_bigip.bigip_ucs_fetch:
     dest: "/tmp/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
-    async_timeout: "{{ bigip_ucs_timeout | default(1800) }}"
+    timeout: "{{ bigip_ucs_timeout | default(1800) }}"
   register: snap_ucs_task
   when: bigip_snapshot_save_ucs | bool
 
