@@ -236,7 +236,6 @@
 
 - name: "SNAPSHOT_PRE | Reset httpapi connection after service restart"
   ansible.builtin.meta: reset_connection
-  when: bigip_snapshot_save_ucs | bool
 
 # -----------------------------------------------------------------------------
 # Save UCS backup - two-step pattern per f5networks.f5_bigip documentation

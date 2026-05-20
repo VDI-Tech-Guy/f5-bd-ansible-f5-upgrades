@@ -1,0 +1,368 @@
+---
+# =============================================================================
+# TEST PLAYBOOK - Validate snapshot diff logic
+# =============================================================================
+# Takes two snapshots 30 seconds apart and runs the diff logic against them.
+# Used to validate diff calculations without running a full upgrade.
+# All diffs should show no changes if the device is stable.
+#
+# Usage:
+#   ansible-playbook playbooks/BIG-IP/Tests/test_diff_validation.yaml \
+#     -i inventory/hosts.ini \
+#     -e "target_host=Demo-16x-Node1"
+#
+# AAP: Set Job Template Limit and Extra Variables to "Prompt on launch"
+# =============================================================================
+
+- name: "TEST - Snapshot diff validation"
+  hosts: "{{ target_host | mandatory }}"
+  gather_facts: false
+  vars:
+    test_output_dir: "/runner/artifacts/snapshots/test"
+    test_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+    snapshot_timestamp: "{{ test_timestamp }}"
+  tasks:
+
+    - name: "TEST | Ensure test output dir exists"
+      ansible.builtin.file:
+        path: "{{ test_output_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+
+    # -------------------------------------------------------------------------
+    # Snapshot 1 - baseline
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Reset connection before snapshot 1"
+      ansible.builtin.meta: reset_connection
+
+    - name: "TEST | Snapshot 1 - Pass 1 partitions and system info"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - partitions
+          - sync-status
+          - system-info
+      register: snap1_base_info
+
+    - name: "TEST | Set partition list"
+      ansible.builtin.set_fact:
+        snap1_partition_names: "{{ snap1_base_info.partitions | map(attribute='name') | list }}"
+
+    - name: "TEST | Snapshot 1 - Pass 2 VS and pools per partition"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - virtual-servers
+          - ltm-pools
+        partition: "{{ item }}"
+      register: snap1_per_partition
+      loop: "{{ snap1_partition_names }}"
+
+    - name: "TEST | Merge snap1 VS results"
+      ansible.builtin.set_fact:
+        snap1_all_vs: >-
+          {{ snap1_per_partition.results
+             | selectattr('virtual_servers', 'defined')
+             | map(attribute='virtual_servers')
+             | flatten }}
+
+    - name: "TEST | Merge snap1 pool results"
+      ansible.builtin.set_fact:
+        snap1_all_pools: >-
+          {{ snap1_per_partition.results
+             | selectattr('ltm_pools', 'defined')
+             | map(attribute='ltm_pools')
+             | flatten }}
+
+    - name: "TEST | Snapshot 1 - AS3 declarations"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - as3
+        partition: Common
+      register: snap1_as3_info
+      ignore_errors: true
+
+    - name: "TEST | Snapshot 1 - routes"
+      f5networks.f5_bigip.bigip_command:
+        commands:
+          - "tmsh show /net route"
+      register: snap1_routes
+
+    - name: "TEST | Snapshot 1 - ARP"
+      f5networks.f5_bigip.bigip_command:
+        commands:
+          - "tmsh show /net arp all"
+      register: snap1_arp
+
+    - name: "TEST | Snapshot 1 - HA failover state"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
+        method: GET
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+        timeout: 60
+      register: snap1_failover
+      delegate_to: localhost
+
+    - name: "TEST | Write snapshot 1 JSON"
+      ansible.builtin.copy:
+        dest: "{{ test_output_dir }}/{{ inventory_hostname }}_{{ test_timestamp }}_snap1.json"
+        content: "{{ snap1_data | to_nice_json }}"
+        mode: '0644'
+      vars:
+        snap1_data:
+          metadata:
+            hostname: "{{ inventory_hostname }}"
+            timestamp: "{{ test_timestamp }}"
+            phase: snap1
+            version: "{{ snap1_base_info.system_info.product_version | default('unknown') }}"
+            ha_failover_state: "{{ 'active' if snap1_failover.json.get('apiRawValues', {}).get('apiAnonymous', '') | lower is search('active') else 'standby' }}"
+            sync_state: "{{ snap1_base_info.sync_status | default([]) | first | default({}) | json_query('status') | default('unknown') }}"
+            partitions: "{{ snap1_partition_names }}"
+          virtual_servers: "{{ snap1_all_vs }}"
+          ltm_pools: "{{ snap1_all_pools }}"
+          as3_declaration: "{{ snap1_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) }}"
+          routes: >-
+            {{ snap1_routes.stdout_lines[0]
+               | default([])
+               | reject('match', '^-+$')
+               | reject('match', '^Net::')
+               | reject('match', '^Name\s')
+               | reject('match', '^\s*$')
+               | list }}
+          arp: >-
+            {{ snap1_arp.stdout_lines[0]
+               | default([])
+               | reject('match', '^-+$')
+               | reject('match', '^Net::')
+               | reject('match', '^Name\s')
+               | reject('match', '^\s*$')
+               | list }}
+      delegate_to: localhost
+
+    - name: "TEST | Snapshot 1 complete"
+      ansible.builtin.debug:
+        msg: |
+          Snapshot 1 complete for {{ inventory_hostname }}
+          VS count    : {{ snap1_all_vs | length }}
+          Pool count  : {{ snap1_all_pools | length }}
+          Route count : {{ snap1_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
+          ARP count   : {{ snap1_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
+
+    # -------------------------------------------------------------------------
+    # Wait 30 seconds between snapshots
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Wait 30 seconds between snapshots"
+      ansible.builtin.pause:
+        seconds: 30
+
+    # -------------------------------------------------------------------------
+    # Snapshot 2 - comparison
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Reset connection before snapshot 2"
+      ansible.builtin.meta: reset_connection
+
+    - name: "TEST | Snapshot 2 - Pass 1 partitions and system info"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - partitions
+          - sync-status
+          - system-info
+      register: snap2_base_info
+
+    - name: "TEST | Set partition list snap2"
+      ansible.builtin.set_fact:
+        snap2_partition_names: "{{ snap2_base_info.partitions | map(attribute='name') | list }}"
+
+    - name: "TEST | Snapshot 2 - Pass 2 VS and pools per partition"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - virtual-servers
+          - ltm-pools
+        partition: "{{ item }}"
+      register: snap2_per_partition
+      loop: "{{ snap2_partition_names }}"
+
+    - name: "TEST | Merge snap2 VS results"
+      ansible.builtin.set_fact:
+        snap2_all_vs: >-
+          {{ snap2_per_partition.results
+             | selectattr('virtual_servers', 'defined')
+             | map(attribute='virtual_servers')
+             | flatten }}
+
+    - name: "TEST | Merge snap2 pool results"
+      ansible.builtin.set_fact:
+        snap2_all_pools: >-
+          {{ snap2_per_partition.results
+             | selectattr('ltm_pools', 'defined')
+             | map(attribute='ltm_pools')
+             | flatten }}
+
+    - name: "TEST | Snapshot 2 - AS3 declarations"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - as3
+        partition: Common
+      register: snap2_as3_info
+      ignore_errors: true
+
+    - name: "TEST | Snapshot 2 - routes"
+      f5networks.f5_bigip.bigip_command:
+        commands:
+          - "tmsh show /net route"
+      register: snap2_routes
+
+    - name: "TEST | Snapshot 2 - ARP"
+      f5networks.f5_bigip.bigip_command:
+        commands:
+          - "tmsh show /net arp all"
+      register: snap2_arp
+
+    - name: "TEST | Snapshot 2 - HA failover state"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
+        method: GET
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+        timeout: 60
+      register: snap2_failover
+      delegate_to: localhost
+
+    - name: "TEST | Write snapshot 2 JSON"
+      ansible.builtin.copy:
+        dest: "{{ test_output_dir }}/{{ inventory_hostname }}_{{ test_timestamp }}_snap2.json"
+        content: "{{ snap2_data | to_nice_json }}"
+        mode: '0644'
+      vars:
+        snap2_data:
+          metadata:
+            hostname: "{{ inventory_hostname }}"
+            timestamp: "{{ test_timestamp }}"
+            phase: snap2
+            version: "{{ snap2_base_info.system_info.product_version | default('unknown') }}"
+            ha_failover_state: "{{ 'active' if snap2_failover.json.get('apiRawValues', {}).get('apiAnonymous', '') | lower is search('active') else 'standby' }}"
+            sync_state: "{{ snap2_base_info.sync_status | default([]) | first | default({}) | json_query('status') | default('unknown') }}"
+            partitions: "{{ snap2_partition_names }}"
+          virtual_servers: "{{ snap2_all_vs }}"
+          ltm_pools: "{{ snap2_all_pools }}"
+          as3_declaration: "{{ snap2_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) }}"
+          routes: >-
+            {{ snap2_routes.stdout_lines[0]
+               | default([])
+               | reject('match', '^-+$')
+               | reject('match', '^Net::')
+               | reject('match', '^Name\s')
+               | reject('match', '^\s*$')
+               | list }}
+          arp: >-
+            {{ snap2_arp.stdout_lines[0]
+               | default([])
+               | reject('match', '^-+$')
+               | reject('match', '^Net::')
+               | reject('match', '^Name\s')
+               | reject('match', '^\s*$')
+               | list }}
+      delegate_to: localhost
+
+    # -------------------------------------------------------------------------
+    # Compute diffs
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Load snapshot 1 data"
+      ansible.builtin.set_fact:
+        snap1_loaded: "{{ lookup('file', test_output_dir + '/' + inventory_hostname + '_' + test_timestamp + '_snap1.json') | from_json }}"
+      delegate_to: localhost
+
+    - name: "TEST | Diff - VS state changes"
+      ansible.builtin.set_fact:
+        diff_test_vs: >-
+          {%- set results = [] -%}
+          {%- for vs2 in snap2_all_vs -%}
+            {%- set vs1 = snap1_loaded.virtual_servers | selectattr('full_path', 'equalto', vs2.full_path) | list | first | default({}) -%}
+            {%- set changed = (vs1.availability_status | default('unknown') != vs2.availability_status | default('unknown')) or
+                              (vs1.enabled | default('unknown') != vs2.enabled | default('unknown')) -%}
+            {%- set _ = results.append({
+              'full_path': vs2.full_path,
+              'snap1_availability': vs1.availability_status | default('not_in_snap1'),
+              'snap2_availability': vs2.availability_status | default('unknown'),
+              'snap1_enabled': vs1.enabled | default('not_in_snap1'),
+              'snap2_enabled': vs2.enabled | default('unknown'),
+              'changed': changed
+            }) -%}
+          {%- endfor -%}
+          {{ results }}
+
+    - name: "TEST | Diff - route count"
+      ansible.builtin.set_fact:
+        diff_test_routes:
+          snap1_count: "{{ snap1_loaded.routes | default([]) | length }}"
+          snap2_count: "{{ snap2_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}"
+          changed: "{{ snap1_loaded.routes | default([]) | length != snap2_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}"
+
+    - name: "TEST | Diff - ARP count"
+      ansible.builtin.set_fact:
+        diff_test_arp:
+          snap1_count: "{{ snap1_loaded.arp | default([]) | length }}"
+          snap2_count: "{{ snap2_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}"
+          changed: "{{ snap1_loaded.arp | default([]) | length != snap2_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}"
+
+    - name: "TEST | Diff - AS3 declarations"
+      ansible.builtin.set_fact:
+        diff_test_as3:
+          changed: >-
+            {{ (snap1_loaded.as3_declaration | default({}) | dict2items
+                | rejectattr('key', 'in', ['controls', 'updateMode'])
+                | list | items2dict | to_json(sort_keys=True)) !=
+               (snap2_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) | dict2items
+                | rejectattr('key', 'in', ['controls', 'updateMode'])
+                | list | items2dict | to_json(sort_keys=True)) }}
+          note: "Excludes controls and updateMode keys"
+      when:
+        - snap2_as3_info is not failed
+        - snap2_as3_info.ansible_facts is defined
+        - snap2_as3_info.ansible_facts.ansible_net_as3_config is defined
+
+    # -------------------------------------------------------------------------
+    # Write diff JSON and summary
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Write diff JSON"
+      ansible.builtin.copy:
+        dest: "{{ test_output_dir }}/{{ inventory_hostname }}_{{ test_timestamp }}_diff_test.json"
+        content: "{{ diff_data | to_nice_json }}"
+        mode: '0644'
+      vars:
+        diff_data:
+          metadata:
+            hostname: "{{ inventory_hostname }}"
+            timestamp: "{{ test_timestamp }}"
+            note: "Two snapshots 30 seconds apart - all diffs should be false on stable device"
+          virtual_servers: "{{ diff_test_vs | default([]) }}"
+          routes: "{{ diff_test_routes | default({}) }}"
+          arp: "{{ diff_test_arp | default({}) }}"
+          as3: "{{ diff_test_as3 | default({'note': 'AS3 not present'}) }}"
+      delegate_to: localhost
+
+    - name: "TEST | Final diff summary"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          DIFF VALIDATION TEST - {{ inventory_hostname }}
+          ------------------------------------------------------------
+          VS changes      : {{ diff_test_vs | default([]) | selectattr('changed', 'equalto', true) | list | length }} of {{ diff_test_vs | default([]) | length }} VSes changed
+          Route count     : snap1={{ diff_test_routes.snap1_count }} snap2={{ diff_test_routes.snap2_count }} changed={{ diff_test_routes.changed }}
+          ARP count       : snap1={{ diff_test_arp.snap1_count }} snap2={{ diff_test_arp.snap2_count }} changed={{ diff_test_arp.changed }}
+          AS3 changed     : {{ diff_test_as3.changed | default('n/a') }}
+          ------------------------------------------------------------
+          Expected result : ALL changed=False on a stable device
+          Output file     : {{ test_output_dir }}/{{ inventory_hostname }}_{{ test_timestamp }}_diff_test.json
+          ============================================================
