@@ -5,7 +5,7 @@
 # Minimum version requirements:
 #   f5networks.f5_bigip  >= 1.0.0  (iControl REST modules, BIG-IP 13.1+ compatible)
 #   f5networks.f5os      >= 1.0.0  (F5OS REST modules for rSeries/Velos)
-#   f5networks.f5_modules >= 1.0.0 (legacy TMSH/SOAP modules, BIG-IP 13.x fallback)
+#   f5networks.f5_modules >= 1.0.0 (bigip_device_license for license reactivation via EE proxy)
 
 collections:
   - name: f5networks.f5_bigip

@@ -157,12 +157,21 @@
       and reactivate manually through BIG-IQ.
   when: bigip_registration_key | length == 0
 
-- name: "LICENSE | Reactivate via EE proxy to activate.f5.com"
-  f5networks.f5_bigip.bigip_license:
+- name: "LICENSE | Reactivate license via f5_modules bigip_device_license"
+  f5networks.f5_modules.bigip_device_license:
     license_key: "{{ bigip_registration_key }}"
     license_server: "{{ bigip_license_server | default('activate.f5.com') }}"
     state: present
+    provider:
+      server: "{{ ansible_host }}"
+      user: "{{ ansible_user }}"
+      password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+      server_port: "{{ bigip_https_port | default(443) }}"
+      validate_certs: false
   register: bigip_license_result
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
   # TROUBLESHOOTING: no_log: true
 
 - name: "LICENSE | Reactivation triggered - device will briefly go Offline"
