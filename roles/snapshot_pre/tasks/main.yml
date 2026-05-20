@@ -206,11 +206,12 @@
   f5networks.f5_bigip.bigip_command:
     commands:
       - "run util bash -c 'bigstart restart restjavad restnoded'"
+  ignore_errors: true
   when: bigip_snapshot_save_ucs | bool
 
 - name: "SNAPSHOT_PRE | Pause for services to restart"
   ansible.builtin.pause:
-    seconds: 30
+    seconds: 60
   when: bigip_snapshot_save_ucs | bool
 
 - name: "SNAPSHOT_PRE | Wait for REST API to be ready after restart"
