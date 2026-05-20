@@ -169,14 +169,49 @@
 # Save UCS backup
 # -----------------------------------------------------------------------------
 
-- name: "SNAPSHOT_PRE | Save and fetch UCS backup from BIG-IP to EE"
+# -----------------------------------------------------------------------------
+# Save UCS backup - two-step async pattern
+# Step 1: Trigger UCS creation on BIG-IP - returns task_id
+# Step 2: Poll until complete and download to EE
+# -----------------------------------------------------------------------------
+
+- name: "SNAPSHOT_PRE | Step 1 - Trigger UCS creation on BIG-IP"
   f5networks.f5_bigip.bigip_ucs_fetch:
-    src: "pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}"
-    dest: "{{ snapshot_output_dir }}/"
-    create_on_missing: true
-    fail_on_missing: false
-  register: snap_ucs_save
+    dest: "{{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+  register: snap_ucs_task
   when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | Step 2 - Poll until UCS complete and download to EE"
+  f5networks.f5_bigip.bigip_ucs_fetch:
+    dest: "{{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+    src: "{{ snap_ucs_task.src }}"
+    task_id: "{{ snap_ucs_task.task_id }}"
+    timeout: "{{ bigip_ucs_timeout | default(1800) }}"
+  register: snap_ucs_save
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - snap_ucs_task.task_id is defined
+
+- name: "SNAPSHOT_PRE | Confirm UCS downloaded to EE"
+  ansible.builtin.stat:
+    path: "{{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+  register: ucs_stat_check
+  delegate_to: localhost
+  when: bigip_snapshot_save_ucs | bool
+
+- name: "SNAPSHOT_PRE | UCS download confirmed"
+  ansible.builtin.debug:
+    msg: "UCS saved to EE: {{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs ({{ ucs_stat_check.stat.size | default(0) | filesizeformat }})"
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - ucs_stat_check.stat.exists | default(false)
+
+- name: "SNAPSHOT_PRE | WARNING - UCS file not found on EE after fetch"
+  ansible.builtin.debug:
+    msg: "WARNING: UCS fetch may have failed for {{ inventory_hostname }} - file not found on EE at {{ snapshot_output_dir }}/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - not ucs_stat_check.stat.exists | default(false)
 
 # -----------------------------------------------------------------------------
 # Write pre-snapshot JSON

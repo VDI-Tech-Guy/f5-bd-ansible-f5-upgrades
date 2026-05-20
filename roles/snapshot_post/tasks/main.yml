@@ -132,12 +132,12 @@
       pre_declaration: "{{ snap_pre_as3_loaded.declaration | default({}) }}"
       post_declaration: "{{ snap_post_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) }}"
       changed: >-
-        {{ (snap_pre_as3_loaded.declaration | default({}) | dict2items
-            | rejectattr('key', 'equalto', 'controls')
-            | list | items2dict | to_json) !=
-           (snap_post_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({}) | dict2items
-            | rejectattr('key', 'equalto', 'controls')
-            | list | items2dict | to_json) }}
+        {{ (snap_pre_as3_loaded.declaration | default({})
+            | combine({'controls': omit})
+            | to_json) !=
+           (snap_post_as3_info.ansible_facts.ansible_net_as3_config.declaration | default({})
+            | combine({'controls': omit})
+            | to_json) }}
       note: "Comparison excludes 'controls' key (archiveTimestamp changes on every AS3 operation)"
   when:
     - pre_as3_stat.stat.exists

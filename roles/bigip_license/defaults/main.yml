@@ -1,0 +1,30 @@
+---
+# =============================================================================
+# bigip_license defaults
+# =============================================================================
+
+# Set true to skip this role entirely for a specific host
+# Use for: BIG-IQ licensed devices, lab/VE, air-gapped environments
+bigip_license_skip: false
+
+# License check mode:
+#   automatic   - EE proxies reactivation to activate.f5.com
+#                 Use for standard registration key licenses only
+#                 BIG-IP does NOT need internet access - EE handles it
+#   check_only  - validate serviceCheckDate only, FAIL if expired
+#   skip        - skip license check entirely for all hosts
+#
+# IMPORTANT - BIG-IQ Licensed Devices:
+#   If your BIG-IP was licensed through BIG-IQ (pool license or BIG-IQ
+#   issued registration key), do NOT use automatic mode. SOAPLicenseClient
+#   points to activate.f5.com not to your BIG-IQ instance and may break
+#   BIG-IQ license tracking. Use bigip_license_skip: true and reactivate
+#   manually through BIG-IQ before running the upgrade playbook.
+bigip_license_mode: automatic
+
+# F5 license server - must be reachable from AAP EE, not from BIG-IP
+bigip_license_server: "activate.f5.com"
+
+# Set true to skip config sync after reactivation
+# Use when HA nodes are on different versions (sync would fail anyway)
+bigip_license_skip_sync: false

@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: bigip_license
+  description: >
+    Check and reactivate BIG-IP license via AAP EE proxy.
+    EE contacts activate.f5.com directly - BIG-IP does not need internet access.
+    Must only run on standby unit in HA pairs as reactivation restarts services.
+  min_ansible_version: "2.15"
+collections:
+  - f5networks.f5_bigip
+dependencies: []
