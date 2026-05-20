@@ -1,0 +1,32 @@
+# Ansible
+*.retry
+ansible.log
+.facts_cache/
+
+# Snapshots - exclude actual snapshot data from repo (large JSON files)
+# Keep the directory structure via .gitkeep
+snapshots/*.json
+snapshots/*.ucs
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets - never commit these
+*vault*
+*password*
+*secret*
+*.key
+*.pem

@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  role_name: snapshot_pre
+  author: f5networks
+  description: >
+    Collects pre-upgrade baseline state from BIG-IP devices:
+    virtual server status, pool member health, route table,
+    ARP table, running config hash, and UCS backup.
+    Saves results as JSON to snapshot_output_dir.
+  min_ansible_version: "2.9"
+collections:
+  - f5networks.f5_bigip
+  - ansible.builtin
+dependencies: []

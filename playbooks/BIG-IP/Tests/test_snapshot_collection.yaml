@@ -1,0 +1,240 @@
+---
+# =============================================================================
+# TEST PLAYBOOK - Validate full snapshot collection
+# =============================================================================
+# Tests all data collection methods used in snapshot_pre and snapshot_post:
+#   1. Partition collection
+#   2. VS and pool collection per partition (merge fix validation)
+#   3. AS3 declaration collection (Common partition)
+#   4. Routes and ARP via bigip_command
+#   5. HA failover state via uri
+#   6. Sync state via bigip_device_info
+#
+# Run against a single host to validate all collection is working correctly
+# before running the full upgrade playbook.
+#
+# Usage:
+#   ansible-playbook playbooks/BIG-IP/Tests/test_snapshot_collection.yaml \
+#     -i inventory/hosts.ini \
+#     -e "target_host=Demo-16x-Node1"
+#
+# AAP: Set Job Template Limit and Extra Variables to "Prompt on launch"
+# =============================================================================
+
+- name: "TEST - Full snapshot collection validation"
+  hosts: "{{ target_host | mandatory }}"
+  gather_facts: false
+  vars:
+    test_output_dir: "/runner/artifacts/snapshots/test"
+    test_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+  tasks:
+
+    - name: "TEST | Ensure test output directory exists"
+      ansible.builtin.file:
+        path: "{{ test_output_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+
+    # -------------------------------------------------------------------------
+    # Pass 1 - Partitions + system info + sync status
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Pass 1 - partitions, system-info, sync-status"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - partitions
+          - sync-status
+          - system-info
+      register: test_base_info
+
+    - name: "TEST | Pass 1 result"
+      ansible.builtin.debug:
+        msg: |
+          Partitions      : {{ test_base_info.partitions | map(attribute='name') | list }}
+          Version         : {{ test_base_info.system_info.product_version | default('unknown') }}
+          Platform        : {{ test_base_info.system_info.platform | default('unknown') }}
+          Marketing name  : {{ test_base_info.system_info.marketing_name | default('unknown') }}
+          Chassis serial  : {{ test_base_info.system_info.chassis_serial | default('unknown') }}
+          Base MAC        : {{ test_base_info.system_info.base_mac_address | default('unknown') }}
+          Sync status count: {{ test_base_info.sync_status | default([]) | length }}
+
+    - name: "TEST | Set partition list"
+      ansible.builtin.set_fact:
+        test_partition_names: "{{ test_base_info.partitions | map(attribute='name') | list }}"
+
+    # -------------------------------------------------------------------------
+    # Pass 2 - VS and pools per partition
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Pass 2 - VS and pools per partition"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - virtual-servers
+          - ltm-pools
+        partition: "{{ item }}"
+      register: test_per_partition
+      loop: "{{ test_partition_names }}"
+
+    - name: "TEST | Pass 2 result per partition"
+      ansible.builtin.debug:
+        msg: |
+          Partition={{ item.item }}
+          VS count={{ item.virtual_servers | default([]) | length }}
+          Pool count={{ item.ltm_pools | default([]) | length }}
+          VS names={{ item.virtual_servers | default([]) | map(attribute='full_path') | list }}
+      loop: "{{ test_per_partition.results }}"
+
+    - name: "TEST | Merge VS results"
+      ansible.builtin.set_fact:
+        test_all_vs: >-
+          {{ test_per_partition.results
+             | selectattr('virtual_servers', 'defined')
+             | map(attribute='virtual_servers')
+             | flatten }}
+
+    - name: "TEST | Merge pool results"
+      ansible.builtin.set_fact:
+        test_all_pools: >-
+          {{ test_per_partition.results
+             | selectattr('ltm_pools', 'defined')
+             | map(attribute='ltm_pools')
+             | flatten }}
+
+    - name: "TEST | Merged collection summary"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          MERGED COLLECTION RESULTS
+          ------------------------------------------------------------
+          Total VS count  : {{ test_all_vs | length }}
+          Total Pool count: {{ test_all_pools | length }}
+          VS list:
+          {% for vs in test_all_vs %}
+            - {{ vs.full_path }} ({{ vs.availability_status | default('unknown') }})
+          {% endfor %}
+          Pool list:
+          {% for pool in test_all_pools %}
+            - {{ pool.full_path }} ({{ pool.availability_status | default('unknown') }})
+          {% endfor %}
+          ============================================================
+
+    # -------------------------------------------------------------------------
+    # AS3 declarations - Common partition
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | AS3 declarations from Common partition"
+      f5networks.f5_bigip.bigip_device_info:
+        gather_subset:
+          - as3
+        partition: Common
+      register: test_as3_info
+      ignore_errors: true
+
+    - name: "TEST | Set AS3 result facts"
+      ansible.builtin.set_fact:
+        test_as3_failed: "{{ test_as3_info is failed }}"
+        test_as3_has_config: "{{ test_as3_info.ansible_facts.ansible_net_as3_config is defined }}"
+      when: test_as3_info.ansible_facts is defined
+
+    - name: "TEST | AS3 result"
+      ansible.builtin.debug:
+        msg: "AS3 collection: failed={{ test_as3_failed | default(true) }} | has_config={{ test_as3_has_config | default(false) }}"
+
+    # -------------------------------------------------------------------------
+    # Routes and ARP via bigip_command
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Routes via tmsh"
+      f5networks.f5_bigip.bigip_command:
+        commands:
+          - "tmsh show /net route"
+      register: test_routes
+
+    - name: "TEST | ARP via tmsh"
+      f5networks.f5_bigip.bigip_command:
+        commands:
+          - "tmsh show /net arp all"
+      register: test_arp
+
+    - name: "TEST | Routes and ARP result"
+      ansible.builtin.debug:
+        msg: |
+          Route lines: {{ test_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
+          ARP lines: {{ test_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
+
+    # -------------------------------------------------------------------------
+    # HA failover state via uri
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | HA failover state via uri"
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
+        method: GET
+        user: "{{ ansible_user }}"
+        password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+        force_basic_auth: true
+        validate_certs: false
+        status_code: 200
+        timeout: 60
+      register: test_failover
+      delegate_to: localhost
+      # TROUBLESHOOTING: no_log: true
+
+    - name: "TEST | HA failover state result"
+      ansible.builtin.debug:
+        msg: |
+          Failover state: {{ 'active' if test_failover.json.get('apiRawValues', {})
+            .get('apiAnonymous', '') | lower is search('active') else 'standby' }}
+
+    # -------------------------------------------------------------------------
+    # Write test snapshot JSON
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Write test snapshot JSON"
+      ansible.builtin.copy:
+        dest: "{{ test_output_dir }}/{{ inventory_hostname }}_{{ test_timestamp }}_test_snapshot.json"
+        content: "{{ test_data | to_nice_json }}"
+        mode: '0644'
+      vars:
+        test_data:
+          metadata:
+            hostname: "{{ inventory_hostname }}"
+            timestamp: "{{ test_timestamp }}"
+            version: "{{ test_base_info.system_info.product_version | default('unknown') }}"
+            platform: "{{ test_base_info.system_info.platform | default('unknown') }}"
+            marketing_name: "{{ test_base_info.system_info.marketing_name | default('unknown') }}"
+            chassis_serial: "{{ test_base_info.system_info.chassis_serial | default('unknown') }}"
+            base_mac_address: "{{ test_base_info.system_info.base_mac_address | default('unknown') }}"
+            partitions: "{{ test_partition_names }}"
+          virtual_servers: "{{ test_all_vs }}"
+          ltm_pools: "{{ test_all_pools }}"
+          as3_declaration: "{{ test_as3_info.ansible_facts.ansible_net_as3_config | default({}) }}"
+          routes: >-
+            {{ test_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
+          arp: >-
+            {{ test_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
+      delegate_to: localhost
+
+    # -------------------------------------------------------------------------
+    # Final summary
+    # -------------------------------------------------------------------------
+
+    - name: "TEST | Final Summary"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          SNAPSHOT COLLECTION TEST - {{ inventory_hostname }}
+          ------------------------------------------------------------
+          Version         : {{ test_base_info.system_info.product_version | default('unknown') }}
+          Platform        : {{ test_base_info.system_info.platform | default('unknown') }}
+          Marketing Name  : {{ test_base_info.system_info.marketing_name | default('unknown') }}
+          Chassis Serial  : {{ test_base_info.system_info.chassis_serial | default('unknown') }}
+          Partitions      : {{ test_partition_names | join(', ') }}
+          Virtual Servers : {{ test_all_vs | length }}
+          LTM Pools       : {{ test_all_pools | length }}
+          AS3 present     : {{ test_as3_has_config | default(false) }}
+          Route lines     : {{ test_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
+          ARP lines       : {{ test_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list | length }}
+          Output file     : {{ test_output_dir }}/{{ inventory_hostname }}_{{ test_timestamp }}_test_snapshot.json
+          ============================================================

@@ -1,0 +1,6 @@
+---
+bigip_image_local_path: "/mnt/software/bigip"
+bigip_image_remote_path: "/var/config/rest/downloads"
+bigip_install_volume: "HD1.2"
+bigip_reboot_after_install: true
+bigip_upgrade_dry_run: false

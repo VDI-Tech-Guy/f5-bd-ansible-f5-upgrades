@@ -1,0 +1,101 @@
+---
+# =============================================================================
+# snapshot_report - Render diff results to Ansible job stdout
+# =============================================================================
+# Reads the diff JSON produced by snapshot_post and emits a structured
+# pass/fail summary to the Ansible job output / AAP UI.
+# =============================================================================
+
+- name: "REPORT | Load diff file"
+  ansible.builtin.set_fact:
+    report_diff: "{{ lookup('file', snapshot_output_dir + '/' + inventory_hostname + '_' + snapshot_timestamp + '_diff.json') | from_json }}"
+  delegate_to: localhost
+
+- name: "REPORT | ============================================================"
+  ansible.builtin.debug:
+    msg: "UPGRADE VALIDATION REPORT - {{ report_diff.metadata.hostname }} ({{ report_diff.metadata.management_ip }})"
+
+- name: "REPORT | Version"
+  ansible.builtin.debug:
+    msg: |
+      VERSION:
+        Before : {{ report_diff.version.pre }}
+        After  : {{ report_diff.version.post }}
+        Result : {{ 'UPGRADED' if report_diff.version.upgraded else 'NO CHANGE (check if upgrade applied)' }}
+
+- name: "REPORT | HA State"
+  ansible.builtin.debug:
+    msg: |
+      HA STATE:
+        Failover Before : {{ report_diff.ha.pre_failover_state }}
+        Failover After  : {{ report_diff.ha.post_failover_state }}
+        Sync Before     : {{ report_diff.ha.pre_sync_state }}
+        Sync After      : {{ report_diff.ha.post_sync_state }}
+        Sync Change     : {{ report_diff.regression_summary.sync_state_change | default('n/a') }}
+        Note            : {{ report_diff.regression_summary.sync_note | default('') }}
+
+- name: "REPORT | Virtual Servers - PASS (no regressions)"
+  ansible.builtin.debug:
+    msg: |
+      VIRTUAL SERVERS: PASS
+        Total checked : {{ report_diff.virtual_servers | length }}
+        Regressions   : 0
+  when: report_diff.regression_summary.vs_regression_count | int == 0
+
+- name: "REPORT | Virtual Servers - FAIL (regressions detected)"
+  ansible.builtin.debug:
+    msg: |
+      VIRTUAL SERVERS: FAIL
+        Total checked : {{ report_diff.virtual_servers | length }}
+        Regressions   : {{ report_diff.regression_summary.vs_regression_count }}
+        Affected VSes : {{ report_diff.regression_summary.vs_regressions | map(attribute='name') | list | join(', ') }}
+  when: report_diff.regression_summary.vs_regression_count | int > 0
+
+- name: "REPORT | Routes"
+  ansible.builtin.debug:
+    msg: |
+      ROUTES:
+        Before : {{ report_diff.routes.pre_line_count }} lines
+        After  : {{ report_diff.routes.post_line_count }} lines
+        Changed: {{ report_diff.routes.changed }}
+
+- name: "REPORT | AS3 Declarations"
+  ansible.builtin.debug:
+    msg: |
+      AS3 DECLARATIONS:
+        Changed : {{ report_diff.as3.changed | default('n/a') }}
+        Result  : {{ 'WARNING - declarations changed during upgrade' if report_diff.as3.changed | default(false) | bool else 'OK - unchanged' }}
+
+- name: "REPORT | Changed Virtual Servers (state changed but not necessarily regressed)"
+  ansible.builtin.debug:
+    msg: |
+      VS CHANGES:
+      {% for vs in report_diff.virtual_servers | selectattr('changed', 'equalto', true) | list %}
+        - {{ vs.name }}: {{ vs.pre_availability }}/{{ vs.pre_enabled }} -> {{ vs.post_availability }}/{{ vs.post_enabled }}{{ ' [REGRESSION]' if vs.regressed else '' }}
+      {% endfor %}
+  when: report_diff.virtual_servers | selectattr('changed', 'equalto', true) | list | length > 0
+
+- name: "REPORT | No VS state changes detected"
+  ansible.builtin.debug:
+    msg: "VS CHANGES: None - all virtual servers in same state as pre-upgrade"
+  when: report_diff.virtual_servers | selectattr('changed', 'equalto', true) | list | length == 0
+
+- name: "REPORT | Overall Result - PASS"
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      OVERALL RESULT : PASS
+      Diff file      : {{ snapshot_output_dir }}/{{ report_diff.metadata.hostname }}_{{ snapshot_timestamp }}_diff.json
+      ============================================================
+  when:
+    - report_diff.regression_summary.vs_regression_count | int == 0
+
+- name: "REPORT | Overall Result - FAIL"
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      OVERALL RESULT : FAIL - REGRESSIONS DETECTED
+      VS regressions : {{ report_diff.regression_summary.vs_regression_count }}
+      Diff file      : {{ snapshot_output_dir }}/{{ report_diff.metadata.hostname }}_{{ snapshot_timestamp }}_diff.json
+      ============================================================
+  when: report_diff.regression_summary.vs_regression_count | int > 0

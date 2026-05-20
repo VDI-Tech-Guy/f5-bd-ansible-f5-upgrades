@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: bigip_wait
+  author: f5networks
+  description: >
+    Layered wait strategy for BIG-IP post-reboot readiness.
+    Handles TCP port probing, REST API /mgmt/shared/echo polling,
+    and connection-drop resilience. Compatible with BIG-IP 13.1+.
+  min_ansible_version: "2.9"
+collections:
+  - ansible.builtin
+dependencies: []

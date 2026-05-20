@@ -1,0 +1,19 @@
+---
+# playbooks/BIG-IP/Upgrades/standalone/vars/upgrade_vars.yml
+# Override defaults for standalone BIG-IP upgrades.
+# Sensitive values (passwords) should be in Ansible Vault.
+
+# Target software version - used for post-upgrade version verification
+# bigip_target_version: "17.1.1"
+
+# ISO filename - must exist at {{ bigip_image_local_path }}/{{ bigip_image_filename }}
+# bigip_image_filename: "BIGIP-17.1.1-0.0.4.iso"
+
+# Boot volume to install to
+bigip_install_volume: "HD1.2"
+
+# Dry run - set true to go through all steps but skip the actual reboot
+bigip_upgrade_dry_run: false
+
+# Snapshot output location (relative to repo root)
+snapshot_output_dir: "{{ playbook_dir }}/../../../../snapshots"

@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  role_name: snapshot_post
+  author: f5networks
+  description: >
+    Collects post-upgrade state from BIG-IP devices and compares
+    against the pre-upgrade snapshot. Produces a JSON diff file
+    and prints a pass/fail summary to Ansible job output.
+  min_ansible_version: "2.9"
+collections:
+  - f5networks.f5_bigip
+  - ansible.builtin
+  - ansible.utils
+# NO dependency on snapshot_pre - if listed here Ansible would re-run
+# snapshot_pre at the start of every post-snapshot play, overwriting
+# the baseline data before the diff can be computed.
+dependencies: []

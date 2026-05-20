@@ -1,0 +1,6 @@
+---
+# f5os_image_filename: "F5OS-A-1.8.0-13798.R4R5.iso"
+f5os_set_next_boot: true
+f5os_reboot_after_stage: true
+f5os_upgrade_dry_run: false
+snapshot_output_dir: "{{ playbook_dir }}/../../../../snapshots"

@@ -1,0 +1,7 @@
+---
+# f5os_image_filename: "F5OS-C-1.8.0-3198.CHASSIS.iso"
+f5os_set_next_boot: true
+f5os_reboot_after_stage: true
+f5os_upgrade_dry_run: false
+f5os_velos_upgrade_controller_first: true
+snapshot_output_dir: "{{ playbook_dir }}/../../../../snapshots"

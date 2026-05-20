@@ -1,0 +1,12 @@
+---
+# snapshot_output_dir is set in group_vars and overridden via extra_vars
+snapshot_output_dir: "/runner/artifacts/snapshots"
+bigip_snapshot_save_ucs: true
+bigip_ucs_path: "/var/local/ucs"
+
+# NOTE: snapshot_timestamp is intentionally NOT defined here.
+# It is set ONCE in Play 0 of the upgrade playbook using:
+#   snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d_%H%M%S') }}"
+# with cacheable: true so it persists across all plays.
+# Defining it in defaults would cause it to re-evaluate on every reference,
+# producing different timestamps for pre and post files - breaking the diff.
