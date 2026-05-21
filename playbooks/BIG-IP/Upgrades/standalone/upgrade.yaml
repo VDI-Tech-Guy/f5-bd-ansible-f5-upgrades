@@ -54,17 +54,18 @@
              else (bigip_ehf_filename if bigip_ehf_filename is defined and bigip_ehf_filename != ''
                    else bigip_image_filename)
                   | regex_replace('^BIGIP-(\d+\.\d+\.\d+\.\d+).*\.iso$', '\1') }}
-- name: "FAIL | Cannot determine target version from filename"
-  ansible.builtin.fail:
-    msg: |
-      Cannot determine target version from image filename.
-      Filename '{{ bigip_ehf_filename if bigip_ehf_filename is defined and bigip_ehf_filename != '' else bigip_image_filename }}'
-      does not match expected format BIGIP-X.X.X.X-*.iso
-      Options:
-        - Rename the ISO to the original F5 filename format e.g. BIGIP-17.5.1.5-0.0.6.iso
-        - Set bigip_target_version: "17.5.1.5" explicitly in AAP Extra Variables
-  when: bigip_target_version | regex_search('^\d+\.\d+\.\d+\.\d+$') is none
         cacheable: true
+
+    - name: "PREFLIGHT | Fail if target version cannot be determined from filename"
+      ansible.builtin.fail:
+        msg: |
+          Cannot determine target version from image filename.
+          Filename '{{ bigip_ehf_filename if bigip_ehf_filename is defined and bigip_ehf_filename != '' else bigip_image_filename }}'
+          does not match expected format BIGIP-X.X.X.X-*.iso
+          Options:
+            - Rename the ISO to the original F5 filename format e.g. BIGIP-17.5.1.5-0.0.6.iso
+            - Set bigip_target_version: "17.5.1.5" explicitly in AAP Extra Variables
+      when: bigip_target_version | regex_search('^\d+\.\d+\.\d+\.\d+$') is none
 
     - name: "PREFLIGHT | Query current software version"
       ansible.builtin.uri:
