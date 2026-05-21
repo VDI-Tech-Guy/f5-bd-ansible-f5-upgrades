@@ -203,7 +203,6 @@
   when:
     - bigip_ehf_filename is defined
     - not bigip_ehf_already_present | bool
-    - bastion_ehf_stat.stat.exists | default(false)
   register: bastion_scp_result
   async: 3600
   poll: 30
