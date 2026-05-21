@@ -168,6 +168,28 @@
     - bigip_ehf_filename is defined and bigip_ehf_filename != ''
     - bigip_ehf_already_present | default(false) | bool
 
+# Write password to temp file - avoids shell special character issues entirely
+- name: "BASTION_PUSH | Remove stale BIG-IP host key from bastion known_hosts"
+  ansible.builtin.shell: >
+    ssh-keygen -R {{ ansible_host }} -f /root/.ssh/known_hosts 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
+  when: not bigip_ehf_already_present | bool
+
+- name: "BASTION_PUSH | Write sshpass password file on bastion"
+  ansible.builtin.copy:
+    dest: "/tmp/.bigip_scp_pass_{{ ansible_host }}"
+    content: "{{ ansible_password | default(ansible_httpapi_password) }}"
+    mode: '0600'
+  delegate_to: bastion
+  vars:
+    ansible_connection: ssh
+  when: not bigip_ehf_already_present | bool
+  # TROUBLESHOOTING: no_log: true
+
 - name: "BASTION_PUSH | EHF - Verify EHF exists on bastion"
   ansible.builtin.stat:
     path: "{{ bastion_image_path }}/{{ bigip_ehf_filename }}"
@@ -206,7 +228,6 @@
   register: bastion_scp_result
   async: 3600
   poll: 30
-  # TROUBLESHOOTING: no_log: true
 
 - name: "BASTION_PUSH | Remove sshpass password file from bastion"
   ansible.builtin.file:
