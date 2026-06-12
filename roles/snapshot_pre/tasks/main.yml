@@ -1,10 +1,11 @@
 ---
+
 # =============================================================================
 # snapshot_pre - Collect baseline state before upgrade
 # =============================================================================
 # Uses f5networks.f5_bigip.bigip_device_info in two passes:
-#   Pass 1: gather_subset: partitions  - get all partition names
-#   Pass 2: loop over partitions        - collect VS and pool per partition
+# Pass 1: gather_subset: partitions - get all partition names
+# Pass 2: loop over partitions - collect VS and pool per partition
 # Routes and ARP use bigip_command. HA failover uses uri.
 #
 # Output: {{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json
@@ -23,7 +24,6 @@
 # -----------------------------------------------------------------------------
 # Pass 1 - Get partition list and system-info/sync-status
 # -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_PRE | Pass 1 - collect partitions and system info"
   f5networks.f5_bigip.bigip_device_info:
     gather_subset:
@@ -45,7 +45,6 @@
 # Pass 2 - Collect VS and pools per partition
 # Loop over each partition and merge results
 # -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_PRE | Pass 2 - collect VS and pools per partition"
   f5networks.f5_bigip.bigip_device_info:
     gather_subset:
@@ -114,7 +113,6 @@
 # -----------------------------------------------------------------------------
 # Routes and ARP via bigip_command
 # -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_PRE | Get route table via tmsh"
   f5networks.f5_bigip.bigip_command:
     commands:
@@ -130,7 +128,6 @@
 # -----------------------------------------------------------------------------
 # HA failover state via uri
 # -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_PRE | Get HA failover state"
   ansible.builtin.uri:
     url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/failover/stats"
@@ -146,12 +143,10 @@
   retries: 5
   delay: 15
   until: snap_failover.status == 200
-  # TROUBLESHOOTING: no_log: true
 
 # -----------------------------------------------------------------------------
 # Normalise HA state values
 # -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_PRE | Normalise - HA failover state"
   ansible.builtin.set_fact:
     snap_failover_state: >-
@@ -166,12 +161,10 @@
          | default({}) | json_query('status') | default('unknown') }}
 
 # -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
 # Increase REST framework timeouts before UCS backup
 # Required when AS3 or other iAppLX packages are installed
 # These packages slow down the REST framework and default timeouts are too low
 # -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_PRE | Increase iapplxrpm timeout for UCS backup"
   f5networks.f5_bigip.bigip_command:
     commands:
@@ -238,16 +231,16 @@
   ansible.builtin.meta: reset_connection
 
 # -----------------------------------------------------------------------------
-# Save UCS backup - two-step pattern per f5networks.f5_bigip documentation
-# Step 1: Trigger UCS creation - dest only, returns task_id and src
-# Step 2: Poll until complete and download - uses task_id and src from Step 1
+# Save UCS backup
+# Step 1: Trigger UCS creation via module - returns task_id and src
+# Step 2: Poll task status via uri until FINISHED
+# Step 3: Download UCS via uri file-transfer endpoint
 # NOTE: AS3 installed significantly increases UCS creation time - known F5 issue
 # -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_PRE | Step 1 - Trigger UCS creation on BIG-IP"
   f5networks.f5_bigip.bigip_ucs_fetch:
     dest: "/tmp/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
-    timeout: "{{ bigip_ucs_timeout | default(1800) }}"
+    timeout: "{{ bigip_ucs_timeout | default(600) | int }}"
   register: snap_ucs_task
   when: bigip_snapshot_save_ucs | bool
 
@@ -263,16 +256,58 @@
     - bigip_snapshot_save_ucs | bool
     - snap_ucs_task.task_id is defined
 
-- name: "SNAPSHOT_PRE | Step 2 - Poll until UCS complete and download to EE"
-  f5networks.f5_bigip.bigip_ucs_fetch:
-    dest: "/tmp/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
-    src: "{{ snap_ucs_task.src }}"
-    task_id: "{{ snap_ucs_task.task_id }}"
-    timeout: "{{ bigip_ucs_timeout | default(1800) | int }}"
-  register: snap_ucs_save
+# -----------------------------------------------------------------------------
+# Step 2: Poll UCS task status via uri
+# Retries = timeout / 15s poll interval
+# -----------------------------------------------------------------------------
+- name: "SNAPSHOT_PRE | Step 2 - Poll UCS task status until FINISHED"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/tm/sys/ucs/tasks/{{ snap_ucs_task.task_id }}"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 200
+    timeout: 30
+  register: snap_ucs_poll
+  delegate_to: localhost
+  until:
+    - snap_ucs_poll.json is defined
+    - snap_ucs_poll.json.status is defined
+    - snap_ucs_poll.json.status in ['FINISHED', 'FAILED']
+  retries: "{{ (bigip_ucs_timeout | default(600) | int / 15) | int }}"
+  delay: 15
   when:
     - bigip_snapshot_save_ucs | bool
     - snap_ucs_task.task_id is defined
+
+- name: "SNAPSHOT_PRE | Fail if UCS task reported FAILED"
+  ansible.builtin.fail:
+    msg: "UCS creation task {{ snap_ucs_task.task_id }} reported FAILED on {{ inventory_hostname }}"
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - snap_ucs_task.task_id is defined
+    - snap_ucs_poll.json.status == 'FAILED'
+
+# -----------------------------------------------------------------------------
+# Step 3: Download UCS via iControl REST file-transfer endpoint
+# -----------------------------------------------------------------------------
+- name: "SNAPSHOT_PRE | Step 3 - Download UCS from BIG-IP to EE"
+  ansible.builtin.uri:
+    url: "https://{{ ansible_host }}:{{ bigip_https_port | default(443) }}/mgmt/shared/file-transfer/ucs-downloads/{{ snap_ucs_task.src }}"
+    method: GET
+    user: "{{ ansible_user }}"
+    password: "{{ ansible_password | default(ansible_httpapi_password) | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: false
+    dest: "/tmp/pre_upgrade_{{ inventory_hostname }}_{{ snapshot_timestamp }}.ucs"
+    timeout: 300
+  delegate_to: localhost
+  when:
+    - bigip_snapshot_save_ucs | bool
+    - snap_ucs_task.task_id is defined
+    - snap_ucs_poll.json.status == 'FINISHED'
 
 - name: "SNAPSHOT_PRE | Copy UCS from tmp to snapshot output dir"
   ansible.builtin.copy:
@@ -283,7 +318,7 @@
   delegate_to: localhost
   when:
     - bigip_snapshot_save_ucs | bool
-    - snap_ucs_save is not failed
+    - snap_ucs_poll.json.status == 'FINISHED'
 
 - name: "SNAPSHOT_PRE | Confirm UCS downloaded to EE"
   ansible.builtin.stat:
@@ -309,7 +344,6 @@
 # -----------------------------------------------------------------------------
 # Write pre-snapshot JSON
 # -----------------------------------------------------------------------------
-
 - name: "SNAPSHOT_PRE | Write pre-snapshot JSON file"
   ansible.builtin.copy:
     dest: "{{ snapshot_output_dir }}/{{ inventory_hostname }}_{{ snapshot_timestamp }}_pre.json"
@@ -336,9 +370,9 @@
       virtual_servers: "{{ snap_all_virtual_servers | default([]) }}"
       ltm_pools: "{{ snap_all_ltm_pools | default([]) }}"
       routes: >-
-          {{ snap_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
+        {{ snap_routes.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
       arp: >-
-          {{ snap_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
+        {{ snap_arp.stdout_lines[0] | default([]) | reject('match', '^-+$') | reject('match', '^Net::') | reject('match', '^Name\s') | reject('match', '^\s*$') | list }}
   delegate_to: localhost
 
 - name: "SNAPSHOT_PRE | Summary"
